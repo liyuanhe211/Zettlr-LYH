@@ -25,6 +25,7 @@ import { pathDirname } from 'source/common/util/renderer-path-polyfill'
 import makeValidUri from 'source/common/util/make-valid-uri'
 import type { ForceOpenAPI } from 'source/app/service-providers/commands/force-open'
 import { sanitizeHTML } from 'source/common/util/sanitize-html'
+import { evaluateBracketedFormula } from 'source/common/util/formula-quantity-calculator'
 
 const ipcRenderer = window.ipc
 
@@ -44,6 +45,12 @@ async function filePreviewTooltip (view: EditorView, pos: number, side: 1 | -1):
   }
 
   const fileToDisplay = view.state.sliceDoc(contentNode.from, contentNode.to)
+
+  // Double-bracket spans holding physical-quantity formulas are not file
+  // links, so they should not produce a file preview.
+  if (evaluateBracketedFormula(fileToDisplay).kind !== 'not-formula') {
+    return null
+  }
 
   const res: FindFileAndReturnMetadataResult|undefined = await ipcRenderer.invoke(
     'application',
