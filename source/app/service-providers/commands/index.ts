@@ -23,6 +23,7 @@ import DirRescan from './dir-rescan'
 import DirSettings from './dir-settings'
 import DirSort from './dir-sort'
 import Export from './export'
+import ExportFormulaCalculated from './export-formula-calculated'
 import FetchLinkPreview from './fetch-link-preview'
 import FileDelete from './file-delete'
 import FileDuplicate from './file-duplicate'
@@ -65,6 +66,7 @@ export const commands = [
   DirSettings,
   DirSort,
   Export,
+  ExportFormulaCalculated,
   FetchLinkPreview,
   FileDelete,
   FileDuplicate,
