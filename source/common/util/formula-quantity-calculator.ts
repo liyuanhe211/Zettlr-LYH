@@ -33,7 +33,7 @@
  * The three error categories a formula evaluation can produce. The associated
  * user-facing labels live in {@link FORMULA_ERROR_LABELS}.
  */
-export type FormulaErrorType = 'syntax'|'unknown-unit'|'unknown-dimension'
+export type FormulaErrorType = 'syntax'|'unknown-unit'|'unknown-dimension'|'dimension-mismatch'
 
 /**
  * User-facing (Chinese) labels for the error categories. These strings were
@@ -42,7 +42,8 @@ export type FormulaErrorType = 'syntax'|'unknown-unit'|'unknown-dimension'
 export const FORMULA_ERROR_LABELS: Record<FormulaErrorType, string> = {
   'syntax': '公式语法错误无法计算',
   'unknown-unit': '物理量计算未定义单位错误',
-  'unknown-dimension': '未知物理量类型'
+  'unknown-dimension': '未知物理量类型',
+  'dimension-mismatch': '量纲不一致无法相加减'
 }
 
 /**
@@ -296,7 +297,7 @@ function tokenize (text: string): Token[] {
  *     factor     := ('+'|'-')* (number unit? | '(' expression ')' unit?)
  *
  * Addition and subtraction require both operands to have the same dimension;
- * a mismatch counts as a syntax (formula) error.
+ * a mismatch raises the dedicated dimension-mismatch error.
  */
 class Parser {
   private position = 0
@@ -322,7 +323,7 @@ class Parser {
       this.position++
       const right = this.parseTerm()
       if (left.mass !== right.mass || left.amount !== right.amount || left.volume !== right.volume) {
-        throw new FormulaError('syntax') // Adding quantities of different dimensions
+        throw new FormulaError('dimension-mismatch')
       }
       left = { ...left, value: next.op === '+' ? left.value + right.value : left.value - right.value }
       next = this.peek()
