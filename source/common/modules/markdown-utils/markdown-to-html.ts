@@ -26,6 +26,7 @@ import type { CitationNode, ASTNode, GenericNode, FootnoteRef } from './markdown
 import { type MarkdownParserConfig } from '../markdown-editor/parser/markdown-parser'
 import _ from 'underscore'
 import { katexToHTML } from '@common/util/mathtex-to-html'
+import { evaluateBracketedFormula, formatFormulaError, formatFormulaResult } from '@common/util/formula-quantity-calculator'
 
 /**
  * Represents an HTML tag. This is a purposefully shallow representation
@@ -354,6 +355,19 @@ export function nodeToHTML (node: ASTNode|ASTNode[], options: MD2HTMLOptions, in
     const body = tagInfo.selfClosing ? '' : nodeToHTML(node.children, options, indent)
     return `${open}${body}${close}`
   } else if (node.type === 'ZettelkastenLink') {
+    // Physical-quantity formulas share the double-bracket syntax with wiki
+    // links. Un-piped spans whose contents look like a formula are displayed
+    // as their computed result (or as a bold red error).
+    if (node.title === undefined) {
+      const outcome = evaluateBracketedFormula(node.target)
+      if (outcome.kind === 'value') {
+        return `${node.whitespaceBefore}<strong style="color: rgb(44, 160, 44)">${formatFormulaResult(outcome.display)}</strong>`
+      } else if (outcome.kind === 'verbatim') {
+        return `${node.whitespaceBefore}<span class="formula-calculation-verbatim">${outcome.display}</span>`
+      } else if (outcome.kind === 'error') {
+        return `${node.whitespaceBefore}<strong style="color: rgb(255, 0, 0)">${formatFormulaError(outcome.label, node.target)}</strong>`
+      }
+    }
     // NOTE: We count a ZettelkastenLink's title as a TextNode for various
     // purposes, such as spellchecking it, but it should not contain any syntax
     // which is why we directly access its value here.

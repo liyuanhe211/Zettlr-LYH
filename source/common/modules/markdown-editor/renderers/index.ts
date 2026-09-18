@@ -26,6 +26,7 @@ import { renderIframes } from './render-iframes'
 import { renderEmphasis } from './render-emphasis'
 import { renderCode } from './render-code'
 import { renderPandoc } from './render-pandoc-div-span'
+import { renderFormulas } from './render-formula'
 import { configField, configUpdateEffect, type EditorConfiguration } from '../util/configuration'
 import type { EditorView } from '@codemirror/view'
 import { hasMarkdownExt } from 'source/common/util/file-extention-checks'
@@ -71,6 +72,7 @@ function configureRenderers (config: Partial<EditorConfiguration>, ext?: Extensi
     updateExtension(renderEmphasis, config.renderEmphasis, ext)
     updateExtension(renderBlockquotes, config.renderEmphasis, ext)
     updateExtension(renderPandoc, config.renderPandoc, ext)
+    updateExtension(renderFormulas, true, ext)
     updateExtension(renderHorizontalRules, config.renderHorizontalRules, ext)
   }
 
