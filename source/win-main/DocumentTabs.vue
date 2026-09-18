@@ -102,6 +102,8 @@ import { trans } from 'source/common/i18n-renderer'
 import showPopupMenu from 'source/common/modules/window-register/application-menu-helper'
 import { closeFile } from './file-manager/util/item-composable'
 import getDocumentTitle from './util/get-document-title'
+import { hasMarkdownExt } from '@common/util/file-extention-checks'
+import { markdownContainsFormulas } from '@common/modules/markdown-utils/formula-calculated-export'
 
 const ipcRenderer = window.ipc
 
@@ -452,10 +454,25 @@ function handleTabbarContext (event: MouseEvent): void {
   })
 }
 
-function handleContextMenu (event: MouseEvent, doc: OpenDocument): void {
+async function handleContextMenu (event: MouseEvent, doc: OpenDocument): Promise<void> {
   const descriptor = workspaceStore.descriptorMap.get(doc.path)
   if (descriptor === undefined || descriptor.type === 'directory') {
     return
+  }
+
+  // The formula-calculated export item is only offered for Markdown files
+  // whose saved contents actually contain double-bracket formulas.
+  let documentHasFormulas = false
+  if (hasMarkdownExt(doc.path)) {
+    try {
+      const contents = await ipcRenderer.invoke('application', {
+        command: 'get-file-contents',
+        payload: doc.path
+      })
+      documentHasFormulas = typeof contents === 'string' && markdownContainsFormulas(contents)
+    } catch (err) {
+      console.error(err)
+    }
   }
 
   const isMac = process.platform === 'darwin'
@@ -585,6 +602,31 @@ function handleContextMenu (event: MouseEvent, doc: OpenDocument): void {
       }
     },
   ]
+
+  if (documentHasFormulas) {
+    items.push(
+      { type: 'separator' },
+      {
+        // Exports a copy in which every double-bracket formula is replaced
+        // by its computed outcome, viewable in any other Markdown viewer.
+        label: 'Export Formula-Calculated Copy',
+        type: 'normal',
+        action () {
+          ipcRenderer.invoke('application', {
+            command: 'export-formula-calculated',
+            payload: { path: doc.path }
+          }).then(newPath => {
+            if (typeof newPath === 'string') {
+              ipcRenderer.send('window-controls', {
+                command: 'show-item-in-folder',
+                payload: { itemPath: newPath }
+              } satisfies WindowControlsIPCAPI)
+            }
+          }).catch(e => console.error(e))
+        }
+      }
+    )
+  }
 
   const point = { x: event.clientX, y: event.clientY }
   showPopupMenu(point, items)
