@@ -14,7 +14,7 @@
       v-bind:data-id="item.type === 'file' ? item.id : ''"
       v-bind:data-path="item.path"
       v-bind:style="{
-        'padding-left': `${depth * 15 + 10}px`
+        'padding-left': `${depth * TREE_INDENT_PER_LEVEL + TREE_INDENT_BASE}px`
       }"
       v-on:click.stop="sel"
       v-on:auxclick.stop="sel"
@@ -24,33 +24,37 @@
       v-on:dragleave="leaveDragging"
       v-on:drop="handleDrop"
     >
-      <!-- First: Secondary icon (if its a directory and it has children) -->
+      <!-- First: for a directory that has children, the icon doubles as a
+      checkable button. Whether the button is checked, not the direction of an
+      angle, is what tells the user that the directory is expanded. -->
       <span
-        class="item-icon"
-        aria-hidden="true"
+        v-if="canBeUncollapsed"
+        v-bind:class="{ 'expand-toggle': true, 'checked': !shouldBeCollapsed }"
+        role="button"
+        v-bind:aria-expanded="!shouldBeCollapsed"
+        v-bind:title="shouldBeCollapsed ? expandLabel : collapseLabel"
         v-on:click.stop="maybeUncollapse"
         v-on:auxclick.stop.prevent="maybeUncollapse"
       >
         <cds-icon
-          v-if="secondaryIcon !== false"
-          v-bind:shape="secondaryIcon"
+          v-bind:shape="primaryIcon"
           role="presentation"
-          v-bind:direction="angleDirection"
           v-bind:class="{
-            'is-solid': typeof secondaryIcon !== 'boolean' && [ 'disconnect', 'blocks-group' ].includes(secondaryIcon),
-            'special': typeof secondaryIcon !== 'boolean'
+            'special': typeof primaryIcon !== 'boolean' && ![ 'right', 'down' ].includes(primaryIcon)
           }"
-        />
+          v-bind:solid="typeof primaryIcon !== 'boolean' && [ 'disconnect', 'blocks-group' ].includes(primaryIcon)"
+        ></cds-icon>
       </span>
-      <!-- Second: Primary icon (The folder, file, or custom icon) -->
-      <span class="toggle-icon" aria-hidden="true">
+      <!-- Everything that cannot be expanded shows its icon without the
+      button frame around it -->
+      <span v-else class="toggle-icon" aria-hidden="true">
         <!-- If the customIcon is set to 'writing-target' we need to display our
         custom progress ring, instead of a regular icon -->
         <RingProgress
           v-if="primaryIcon === 'writing-target'"
           v-bind:ratio="writingTargetPercent"
         ></RingProgress>
-        <!-- Otherwise, display whatever the secondary Icon is -->
+        <!-- Otherwise, display whatever the primary Icon is -->
         <cds-icon
           v-else
           v-bind:shape="primaryIcon"
@@ -189,6 +193,7 @@ import { getSorter } from 'source/common/util/directory-sorter'
 import type { WritingTarget } from 'source/app/service-providers/targets'
 import { filterDescriptorChildren } from './util/filter-children'
 import getDocumentTitle from '../util/get-document-title'
+import { TREE_INDENT_BASE, TREE_INDENT_PER_LEVEL } from './util/tree-indentation'
 
 const ipcRenderer = window.ipc
 
@@ -234,6 +239,8 @@ const {
 } = useItemComposable(props.item, displayText, props.windowId, nameEditingInput)
 
 const filenameInputPlaceholder = trans('Enter a name')
+const expandLabel = trans('Expand this directory')
+const collapseLabel = trans('Collapse this directory')
 
 function sel (event: MouseEvent): void {
   requestSelection(event)
@@ -255,17 +262,16 @@ configStore.$subscribe((_mutation, state) => {
 })
 
 /**
- * The secondary icon's shape -- this is the visually FIRST icon to be
- * displayed. Displays either an angle (for directories with children), or
- * nothing.
+ * Whether this row can be expanded at all, which is the case for directories
+ * that have children. Only those rows turn their icon into a checkable button.
  *
- * @return  {string|boolean}  False if no secondary icon
+ * @return  {boolean}  True if the row has something to expand
  */
-const secondaryIcon = computed(() => filteredChildren.value.length > 0 ? 'angle' : false)
+const canBeUncollapsed = computed(() => filteredChildren.value.length > 0)
 
 /**
- * The primary icon's shape -- this is the visually SECOND icon to be
- * displayed. Returns an icon appropriate to the item we are representing.
+ * The primary icon's shape -- the icon of the row itself. Returns an icon
+ * appropriate to the item we are representing.
  *
  * @return  {string}  The icon name (as in: cds-shape)
  */
@@ -310,14 +316,6 @@ const primaryIcon = computed(() => {
     return shouldBeCollapsed.value ? 'folder' : 'folder-open'
   }
 })
-
-/**
- * The direction of the folder's angle icon: Right if collapsed, down if
- * uncollapsed. Can be undefined.
- *
- * @return  {string}  Either 'right' or 'down'
- */
-const angleDirection = computed(() => shouldBeCollapsed.value ? 'right' : 'down')
 
 const writingTarget = computed<undefined|{ path: string, mode: 'words'|'chars', count: number }>(() => {
   if (props.item.type !== 'file') {
@@ -769,13 +767,16 @@ body {
       &.yellow { color: var(--accent-yellow); }
       &.green { color: var(--accent-green); }
 
-      .item-icon, .toggle-icon {
+      .expand-toggle, .toggle-icon {
         display: flex;
         align-items: center;
         justify-content: center;
         width: 20px;
         flex-shrink: 0; // Prevent shrinking; only the display text should
       }
+
+      // The checkable button an expandable row wears instead of an angle is
+      // styled once for the whole pane, in FileTree.vue.
 
       // These inputs should be more or less "invisible"
       input.filename-input {

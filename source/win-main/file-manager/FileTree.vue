@@ -14,24 +14,26 @@
         </div>
       </div>
 
-      <template v-if="getFiles.length > 0">
+      <template v-if="filteredHistoryPaths.length > 0">
         <div
           id="directories-files-header"
           v-bind:title="showFilesSection ? hideFilesLabel : showFilesLabel"
           v-on:click="configStore.setConfigValue('fileManagerShowFiles', !showFilesSection)"
           v-on:contextmenu="fileRootContextMenu"
         >
-          <cds-icon
-            role="presentation"
-            shape="angle"
-            v-bind:direction="showFilesSection ? 'down' : 'right'"
-          ></cds-icon>
-
-          <cds-icon
+          <!-- The section icon doubles as a checkable button: being pressed in
+          is what tells the user that the section is unfolded. -->
+          <span
             v-if="platform !== 'darwin'"
-            shape="file"
-            role="presentation"
-          ></cds-icon>
+            v-bind:class="{ 'expand-toggle': true, 'checked': showFilesSection }"
+            role="button"
+            v-bind:aria-expanded="showFilesSection"
+          >
+            <cds-icon
+              shape="file"
+              role="presentation"
+            ></cds-icon>
+          </span>
 
           {{ fileSectionHeading }}
 
@@ -44,18 +46,13 @@
         </div>
 
         <template v-if="showFilesSection">
-          <TreeItem
-            v-for="item in getFiles"
-            v-bind:key="item.path"
-            v-bind:item="item"
-            v-bind:depth="0"
+          <HistoryTree
+            ref="historyTreeComponent"
+            v-bind:history-paths="filteredHistoryPaths"
+            v-bind:filter-active="query !== ''"
             v-bind:active-item="activeTreeItem?.[0]"
-            v-bind:filter-results="filterResults"
-            v-bind:has-duplicate-name="getFiles.filter(i => i.name === item.name).length > 1"
             v-bind:window-id="props.windowId"
-            v-on:toggle-file-list="emit('toggle-file-list')"
-          >
-          </TreeItem>
+          ></HistoryTree>
         </template>
       </template>
 
@@ -66,17 +63,19 @@
           v-on:click="configStore.setConfigValue('fileManagerShowWorkspaces', !showWorkspacesSection)"
           v-on:contextmenu="workspaceRootContextMenu"
         >
-          <cds-icon
-            role="presentation"
-            shape="angle"
-            v-bind:direction="showWorkspacesSection ? 'down' : 'right'"
-          ></cds-icon>
-
-          <cds-icon
+          <!-- The section icon doubles as a checkable button: being pressed in
+          is what tells the user that the section is unfolded. -->
+          <span
             v-if="platform !== 'darwin'"
-            shape="tree-view"
-            role="presentation"
-          ></cds-icon>
+            v-bind:class="{ 'expand-toggle': true, 'checked': showWorkspacesSection }"
+            role="button"
+            v-bind:aria-expanded="showWorkspacesSection"
+          >
+            <cds-icon
+              shape="tree-view"
+              role="presentation"
+            ></cds-icon>
+          </span>
 
           {{ workspaceSectionHeading }}
 
@@ -159,6 +158,7 @@
 
 import { trans } from '@common/i18n-renderer'
 import TreeItem from './TreeItem.vue'
+import HistoryTree from './HistoryTree.vue'
 import matchQuery from './util/match-query'
 import { ref, computed } from 'vue'
 import { useConfigStore, useDocumentTreeStore, useWindowStateStore } from 'source/pinia'
@@ -193,6 +193,9 @@ const activeTreeItem = ref<undefined|[string, string]>(undefined)
 
 const workspacesContextMenuButton = ref<HTMLElement|null>(null)
 const showSortingPopover = ref(false)
+// The open history tree that renders the Files section. We need a handle on it
+// to retrieve the rows it currently displays for the arrow key navigation.
+const historyTreeComponent = ref<InstanceType<typeof HistoryTree>|null>(null)
 
 const workspaceStore = useWorkspaceStore()
 const windowStateStore = useWindowStateStore()
@@ -250,6 +253,30 @@ const getFiles = computed(() => {
   return roots.filter(root => filterResults.value.includes(root.path))
 })
 
+/**
+ * The open history: every file the user has opened, the most recent one first.
+ */
+const openHistoryPaths = computed(() => configStore.config.app.openFiles)
+
+/**
+ * The open history reduced to the files that match the quick filter. With no
+ * filter query, this is the entire history.
+ */
+const filteredHistoryPaths = computed(() => {
+  if (query.value === '') {
+    return openHistoryPaths.value
+  }
+
+  return openHistoryPaths.value.filter(absPath => filterResults.value.includes(absPath))
+})
+
+/**
+ * The rows the open history tree currently displays, in rendering order.
+ */
+const historyTreeVisibleRows = computed<Array<[string, string]>>(() => {
+  return historyTreeComponent.value?.visibleRows ?? []
+})
+
 const getDirectories = computed(() => {
   const roots = rootDescriptors.value.filter(desc => desc.type === 'directory')
   const q = query.value
@@ -283,9 +310,7 @@ const flatSortedAndFilteredVisualFileDescriptors = computed<Array<[string, strin
 
   // Fourth, sort them recursively so that the list is the same as what the file
   // tree will see
-  const retValue: AnyDescriptor[] = [
-    ...getFiles.value
-  ]
+  const retValue: AnyDescriptor[] = []
 
   const { sorting, sortFoldersFirst, fileNameDisplay, appLang, fileMetaTime } = configStore.config
   const sorter = getSorter(sorting, sortFoldersFirst, fileNameDisplay, appLang, fileMetaTime)
@@ -295,13 +320,17 @@ const flatSortedAndFilteredVisualFileDescriptors = computed<Array<[string, strin
     retValue.push(...retrieveChildrenAndSort(descriptor, visibleDescriptors, sorter))
   }
 
-  return retValue
+  const workspaceRows = retValue
     // Filter out any files and folders that should not be displayed such that
     // this "global" list of files and folders corresponds exactly to how they
     // will be displayed to the user. This is especially important for the
     // navigation with the arrow keys.
     .filter(filter)
-    .map(descriptor => ([ descriptor.path, descriptor.type ]))
+    .map(descriptor => ([ descriptor.path, descriptor.type ] as [string, string]))
+
+  // The Files section is no longer a flat list of root files but the open
+  // history tree, so its visible rows come from that component.
+  return [ ...historyTreeVisibleRows.value, ...workspaceRows ]
 })
 
 /**
@@ -642,6 +671,35 @@ body {
 
     &.hidden { left:-100%; }
 
+    // Nothing in this pane displays an angle to say whether it is unfolded.
+    // Instead, the icon of a section header or of an expandable row doubles as
+    // a checkable button, and being visibly pressed in is what says "expanded".
+    .expand-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      box-sizing: border-box;
+      flex-shrink: 0;
+      // A frame faint enough not to clutter a narrow pane, but there in both
+      // states, so that the control still reads as a button while unchecked.
+      border: 1px solid var(--grey-1);
+      border-radius: 3px;
+      cursor: pointer;
+
+      &:hover {
+        border-color: var(--grey-3);
+        background-color: var(--grey-0);
+      }
+
+      &.checked {
+        border-color: var(--grey-3);
+        background-color: var(--grey-1);
+        box-shadow: inset 0px 1px 2px rgba(0, 0, 0, 0.2);
+      }
+    }
+
     #directories-dirs-header, #directories-files-header {
       display: flex;
       gap: 10px;
@@ -685,6 +743,21 @@ body {
 
   &.dark {
     #file-tree {
+      .expand-toggle {
+        border-color: var(--grey-6);
+
+        &:hover {
+          border-color: var(--grey-4);
+          background-color: var(--grey-6);
+        }
+
+        &.checked {
+          border-color: var(--grey-4);
+          background-color: var(--grey-5);
+          box-shadow: inset 0px 1px 2px rgba(0, 0, 0, 0.4);
+        }
+      }
+
       #directories-dirs-header, #directories-files-header {
         .close-all {
             background-color: var(--grey-4);
