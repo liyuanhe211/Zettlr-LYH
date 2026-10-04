@@ -107,6 +107,7 @@ const viewerConfiguration = computed<EditorConfiguration>(() => {
     renderHeadings: display.renderHTags,
     renderEmphasis: display.renderEmphasis,
     renderPandoc: display.renderPandoc,
+    renderAdmonitions: display.renderAdmonitions,
     renderHorizontalRules: display.renderHorizontalRules,
     boldFormatting: editor.boldFormatting,
     italicFormatting: editor.italicFormatting,

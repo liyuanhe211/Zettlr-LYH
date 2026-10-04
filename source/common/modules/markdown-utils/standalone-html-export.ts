@@ -625,6 +625,39 @@ body {
   margin-bottom: 0;
 }
 
+/* Admonitions (> [!NOTE] etc.), colored like the editor's preview */
+#document .admonition {
+  border-radius: 8px;
+  padding: 0.5em;
+  margin: 0 0 1em 0.25em;
+  border: 1px solid transparent;
+}
+
+#document .admonition > :last-child {
+  margin-bottom: 0;
+}
+
+#document .admonition-title,
+#document .admonition::before {
+  display: block;
+  font-weight: bold;
+}
+
+/* The converter emits a title element only for custom titles; the generic
+   keyword titles are restored here */
+#document .admonition:has(> .admonition-title)::before { content: none; }
+#document .admonition.note::before { content: 'Note'; }
+#document .admonition.tip::before { content: 'Tip'; }
+#document .admonition.important::before { content: 'Important'; }
+#document .admonition.warning::before { content: 'Warning'; }
+#document .admonition.caution::before { content: 'Caution'; }
+
+#document .admonition.note { background-color: rgb(220, 220, 220); border-color: rgb(125, 125, 125); color: rgb(125, 125, 125); }
+#document .admonition.tip { background-color: rgb(200, 250, 200); border-color: rgb(75, 134, 75); color: rgb(75, 134, 75); }
+#document .admonition.important { background-color: rgb(250, 180, 250); border-color: rgb(133, 87, 133); color: rgb(133, 87, 133); }
+#document .admonition.warning { background-color: rgb(250, 250, 180); border-color: rgb(130, 130, 48); color: rgb(130, 130, 48); }
+#document .admonition.caution { background-color: rgb(250, 210, 210); border-color: rgb(148, 76, 76); color: rgb(148, 76, 76); }
+
 /* Lists: tight like the editor's lines, with the marker in the accent color */
 #document ul, #document ol {
   padding-left: 1.3em;
