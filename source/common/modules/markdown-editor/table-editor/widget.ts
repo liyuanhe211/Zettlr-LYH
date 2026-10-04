@@ -32,6 +32,7 @@ import openMarkdownLink from '../util/open-markdown-link'
 import { renderCellTaskCheckboxes } from './cell-tasks'
 import { cellContentsChanged, forgetCellContents, renderCellContents } from './cell-contents'
 import { sourceOffsetForCellClick } from './cell-caret'
+import { activeCellRangeBounds, CELL_RANGE_SELECTED_CLASS, type CellRangeBounds, isCellInBounds, trackCellDrag } from './cell-range-selection'
 
 /**
  * This holds the last measured height of each rendered table to provide
@@ -338,7 +339,12 @@ function updateTable (table: HTMLTableElement, tableAST: Table, view: EditorView
     tr.parentElement?.removeChild(tr)
   }
 
-  const coords = getCoordinatesForRange(view.state.selection.main, tableAST)
+  // While a range of cells is selected (see cell-range-selection.ts), no cell
+  // is being edited, even though the main selection stays inside the table.
+  const selectedCells = activeCellRangeBounds(view.state, tableAST.from)
+  const coords = selectedCells === undefined
+    ? getCoordinatesForRange(view.state.selection.main, tableAST)
+    : undefined
 
   for (let i = 0; i < tableAST.rows.length; i++) {
     const row = tableAST.rows[i]
@@ -349,7 +355,7 @@ function updateTable (table: HTMLTableElement, tableAST: Table, view: EditorView
       trs.push(tr)
     }
     // Transfer the contents
-    updateRow(trs[i], row, i, tableAST.alignment, view, rowsChanged, coords)
+    updateRow(trs[i], row, i, tableAST.alignment, view, rowsChanged, coords, selectedCells)
   }
 
   // Store the table's document range on the element so that other extensions
@@ -358,7 +364,7 @@ function updateTable (table: HTMLTableElement, tableAST: Table, view: EditorView
   table.dataset.tableFrom = String(tableAST.from)
   table.dataset.tableTo = String(tableAST.to)
 
-  manageColumnWidthLock(table, tableAST, view, coords)
+  manageColumnWidthLock(table, tableAST, view, coords, selectedCells !== undefined)
 }
 
 /**
@@ -387,15 +393,23 @@ export const LOCKED_WIDTHS_ATTRIBUTE = 'data-locked-col-widths'
  *                                                      undefined if the
  *                                                      selection is outside
  *                                                      the table
+ * @param  {boolean}                          cellRangeActive  Whether a range
+ *                                                      of cells is selected in
+ *                                                      this table
  */
 function manageColumnWidthLock (
   table: HTMLTableElement,
   tableAST: Table,
   view: EditorView,
-  coords: { col: number, row: number }|undefined
+  coords: { col: number, row: number }|undefined,
+  cellRangeActive: boolean
 ): void {
-  const editingCell = coords !== undefined ? `${coords.row}:${coords.col}` : ''
   const wasEditingCell = table.dataset.editingCell ?? ''
+  // While a range of cells is being selected, the column widths stay as they
+  // are, so that the cells do not move under the mouse.
+  const editingCell = coords !== undefined
+    ? `${coords.row}:${coords.col}`
+    : cellRangeActive ? (wasEditingCell !== '' ? wasEditingCell : 'range') : ''
   table.dataset.editingCell = editingCell
 
   const columnCount = tableAST.rows[0]?.cells.length ?? 0
@@ -546,6 +560,8 @@ function refitColumnWidths (table: HTMLTableElement, view: EditorView, cacheKey:
  * @param  {TableRow}             astRow  The AST table row element
  * @param  {number}               idx     The row's index in the table
  * @param  {EditorView}           view    The EditorView
+ * @param  {CellRangeBounds}      selectedCells  The selected range of cells,
+ *                                               if any
  */
 function updateRow (
   tr: HTMLTableRowElement,
@@ -555,6 +571,7 @@ function updateRow (
   view: EditorView,
   rowsChanged: boolean,
   selectionCoords?: { col: number, row: number },
+  selectedCells?: CellRangeBounds
 ): void {
   const tds = [...tr.querySelectorAll(astRow.isHeaderOrFooter ? 'th' : 'td')]
   const columnsChanged = tds.length !== astRow.cells.length
@@ -597,14 +614,23 @@ function updateRow (
       // time around (see below).
       td.addEventListener('mousedown', (event) => {
         if (contentWrapper.classList.contains('editing')) {
-          // There is already a subview inside this cell to handle selections.
+          // There is already a subview inside this cell to handle selections
+          // within the cell. Only a drag into other cells is handled here.
+          if (event.button === 0) {
+            const subview = EditorView.findFromDOM(contentWrapper)
+            const anchor = subview?.posAtCoords({ x: event.clientX, y: event.clientY }, false) ?? view.state.selection.main.anchor
+            trackCellDrag(view, td, event, anchor, true)
+          }
           return
         }
 
         event.preventDefault()
         event.stopPropagation()
 
-        setSelectionToCell(td, event, view)
+        const anchor = setSelectionToCell(td, event, view)
+        if (event.button === 0) {
+          trackCellDrag(view, td, event, anchor, false)
+        }
       })
 
       td.addEventListener('contextmenu', (event) => {
@@ -652,6 +678,7 @@ function updateRow (
     tds[i].dataset.cellFrom = String(cell.from)
     tds[i].dataset.cellTo = String(cell.to)
     tds[i].style.textAlign = align[i] ?? ''
+    tds[i].classList.toggle(CELL_RANGE_SELECTED_CLASS, selectedCells !== undefined && isCellInBounds(selectedCells, idx, i))
 
     const contentWrapper: HTMLDivElement = tds[i].querySelector('div.content')!
     const subview = EditorView.findFromDOM(contentWrapper)
@@ -751,8 +778,10 @@ function updateRow (
  * @param   {HTMLTableCellElement}  td     The table cell element
  * @param   {MouseEvent}            event  The mouse event of the click
  * @param   {EditorView}            view   The editor view
+ *
+ * @return  {number}                       The new cursor position
  */
-function setSelectionToCell (td: HTMLTableCellElement, event: MouseEvent, view: EditorView): void {
+function setSelectionToCell (td: HTMLTableCellElement, event: MouseEvent, view: EditorView): number {
   // NOTE: Read the cell's range and source at the time of the click, since the
   // listeners outlive any edits to the cell.
   const cellFrom = parseInt(td.dataset.cellFrom ?? '0', 10)
@@ -762,5 +791,7 @@ function setSelectionToCell (td: HTMLTableCellElement, event: MouseEvent, view: 
   const offset = contentWrapper !== null
     ? sourceOffsetForCellClick(contentWrapper, source, event.clientX, event.clientY)
     : source.length
-  view.dispatch({ selection: { anchor: Math.min(cellFrom + offset, cellTo) } })
+  const position = Math.min(cellFrom + offset, cellTo)
+  view.dispatch({ selection: { anchor: position } })
+  return position
 }
