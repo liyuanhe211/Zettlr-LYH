@@ -57,7 +57,7 @@ const customTagHighlight = HighlightStyle.define([
   { tag: customTags.TableCell, class: 'cm-pipe-table-cell ' },
 ])
 
-const tagHighlight = HighlightStyle.define([
+export const tagHighlight = HighlightStyle.define([
   { tag: tags.angleBracket, class: 'cm-angle-bracket' },
   { tag: tags.annotation, class: 'cm-annotation' },
   { tag: tags.arithmeticOperator, class: 'cm-arithmetic-operator' },
