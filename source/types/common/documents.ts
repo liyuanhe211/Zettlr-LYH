@@ -28,6 +28,7 @@ export enum DocumentType {
   LaTeX,
   YAML,
   JSON,
+  JSONL,
 }
 
 /**
