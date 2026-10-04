@@ -18,18 +18,20 @@ import type { EditorState, Range } from '@codemirror/state'
 import type { Rect, DecorationSet } from '@codemirror/view'
 import { WidgetType, EditorView, Decoration } from '@codemirror/view'
 import type { SyntaxNode } from '@lezer/common'
-import type { TableRow, Table, TableCell } from '../../markdown-utils/markdown-ast'
+import type { TableRow, Table } from '../../markdown-utils/markdown-ast'
 import { parseTableNode } from '../../markdown-utils/markdown-ast/parse-table-node'
 import { nodeToHTML } from '../../markdown-utils/markdown-to-html'
 import { createSubviewForCell, hiddenSpanField } from './subview'
 import { getCoordinatesForRange } from './commands/util'
-import { generateColumnControls, generateEmptyTableWidgetElement, generateRowControls, tableTD, tableTH, tableTR } from './widget-dom'
+import { generateColumnControls, generateEmptyTableWidgetElement, generateRowControls, tableTD, tableTH, tableTR, TABLE_WIDGET_WRAPPER_CLASS } from './widget-dom'
 import { displayTableContextMenu } from './context-menu'
 import { CITEPROC_MAIN_DB } from 'source/types/common/citeproc'
 import { configField } from '../util/configuration'
 import { interceptAnchorClicks } from './util/anchor-callbacks'
 import openMarkdownLink from '../util/open-markdown-link'
-import { sanitizeHTML } from 'source/common/util/sanitize-html'
+import { renderCellTaskCheckboxes } from './cell-tasks'
+import { cellContentsChanged, forgetCellContents, renderCellContents } from './cell-contents'
+import { sourceOffsetForCellClick } from './cell-caret'
 
 /**
  * This holds the last measured height of each rendered table to provide
@@ -66,6 +68,30 @@ const TABLE_HEIGHT_CACHE = new (class {
     this.cache.set(key, value)
   }
 })()
+
+/**
+ * Returns the height that Codemirror will measure for this table's widget, that
+ * is: the height of the widget's wrapper element, not of the table inside it.
+ *
+ * NOTE that the distinction matters a great deal. The wrapper carries vertical
+ * padding (so that the row/column handles never get clipped) and, since it
+ * scrolls horizontally, possibly a scrollbar. Codemirror measures the wrapper,
+ * because that is the DOM element the widget produced. If `estimatedHeight`
+ * reports the inner table's height instead, the height map and the actual
+ * layout disagree by exactly that difference every time the height map is
+ * rebuilt from estimates. Codemirror's scroll anchoring then compensates for
+ * the apparent shift on every measure cycle, which makes the editor creep
+ * downwards -- continuously, since each scroll adjustment triggers the next
+ * measure cycle. See issue #5940.
+ *
+ * @param   {HTMLElement}  tableOrWrapper  Either the table or its wrapper
+ *
+ * @return  {number}                       The wrapper's height in pixels
+ */
+function measureWidgetHeight (tableOrWrapper: HTMLElement): number {
+  const wrapper = tableOrWrapper.closest(`.${TABLE_WIDGET_WRAPPER_CLASS}`) ?? tableOrWrapper
+  return wrapper.getBoundingClientRect().height
+}
 
 // This widget holds a visual DOM representation of a table.
 export class TableWidget extends WidgetType {
@@ -127,8 +153,7 @@ export class TableWidget extends WidgetType {
       const cacheKey = this.cacheKey
       view.requestMeasure({
         read () {
-          const height = table.getBoundingClientRect().height
-          TABLE_HEIGHT_CACHE.set(cacheKey, height)
+          TABLE_HEIGHT_CACHE.set(cacheKey, measureWidgetHeight(wrapper))
         },
         key: cacheKey
       })
@@ -160,14 +185,15 @@ export class TableWidget extends WidgetType {
       updateTable(table, tableAST, view)
       // Instruct the editor to remeasure its height; see
       // https://discuss.codemirror.net/t/5604
-      const height = table.getBoundingClientRect().height
+      // NOTE: `dom` is the widget's wrapper element, which is what has to be
+      // measured here (see measureWidgetHeight above).
+      const height = measureWidgetHeight(dom)
       if (prevHeight !== height) {
 
         const cacheKey = this.cacheKey
         view.requestMeasure({
           read () {
-            const height = table.getBoundingClientRect().height
-            TABLE_HEIGHT_CACHE.set(cacheKey, height)
+            TABLE_HEIGHT_CACHE.set(cacheKey, measureWidgetHeight(dom))
           },
           key: cacheKey
         })
@@ -325,6 +351,189 @@ function updateTable (table: HTMLTableElement, tableAST: Table, view: EditorView
     // Transfer the contents
     updateRow(trs[i], row, i, tableAST.alignment, view, rowsChanged, coords)
   }
+
+  // Store the table's document range on the element so that other extensions
+  // (specifically the scroll lock registered in index.ts) can relate scroll
+  // requests to this table.
+  table.dataset.tableFrom = String(tableAST.from)
+  table.dataset.tableTo = String(tableAST.to)
+
+  manageColumnWidthLock(table, tableAST, view, coords)
+}
+
+/**
+ * The attribute that marks a table whose column widths are currently locked
+ * because one of its cells is being edited. The scroll lock in index.ts keys
+ * off this attribute as well.
+ */
+export const LOCKED_WIDTHS_ATTRIBUTE = 'data-locked-col-widths'
+
+/**
+ * Handles the column width lock lifecycle for a table widget (see #5940).
+ *
+ * While any cell of the table is being edited, the column widths are frozen so
+ * that typing does not continuously re-layout the entire table (the layout
+ * thrashing was one of the causes for the view jumping around during edits).
+ * Only when the cell editing mode is exited -- the cursor moved to a different
+ * cell, or out of the table entirely -- are the column widths re-fitted to the
+ * contents: exactly once, and anchored such that the cursor position on screen
+ * does not move.
+ *
+ * @param  {HTMLTableElement}                 table     The table element
+ * @param  {Table}                            tableAST  The table AST node
+ * @param  {EditorView}                       view      The main EditorView
+ * @param  {{ col: number, row: number }?}    coords    The cell coordinates of
+ *                                                      the main selection, or
+ *                                                      undefined if the
+ *                                                      selection is outside
+ *                                                      the table
+ */
+function manageColumnWidthLock (
+  table: HTMLTableElement,
+  tableAST: Table,
+  view: EditorView,
+  coords: { col: number, row: number }|undefined
+): void {
+  const editingCell = coords !== undefined ? `${coords.row}:${coords.col}` : ''
+  const wasEditingCell = table.dataset.editingCell ?? ''
+  table.dataset.editingCell = editingCell
+
+  const columnCount = tableAST.rows[0]?.cells.length ?? 0
+  const isLocked = table.getAttribute(LOCKED_WIDTHS_ATTRIBUTE) === 'true'
+  const columnsChangedWhileLocked = isLocked && table.dataset.lockedColumnCount !== String(columnCount)
+
+  if (editingCell !== '' && wasEditingCell === '') {
+    // Entering cell editing mode: Freeze the current column widths. This
+    // happens BEFORE the cell's subview gets mounted (the mounting is
+    // scheduled in a rAF within updateRow), so we capture the pre-edit layout.
+    if (table.isConnected) {
+      lockColumnWidths(table)
+    } else {
+      // We came through toDOM: The table is not yet attached to the document,
+      // so measuring is impossible. Defer the locking until it is.
+      requestAnimationFrame(() => { lockColumnWidths(table) })
+    }
+  } else if (editingCell === '' && wasEditingCell !== '') {
+    // The selection left the table: Re-fit the columns once, keeping the
+    // cursor stationary on screen.
+    refitColumnWidths(table, view, `${tableAST.from}`, false)
+  } else if (editingCell !== '' && (editingCell !== wasEditingCell || columnsChangedWhileLocked)) {
+    // The selection moved to a different cell (or the table structure changed
+    // while locked, e.g., a column was added): Re-fit the columns once and
+    // freeze the new widths, keeping the cursor stationary on screen.
+    refitColumnWidths(table, view, `${tableAST.from}`, true)
+  }
+}
+
+/**
+ * Freezes the table's current column widths by giving the first row's cells
+ * explicit pixel widths and switching the table to the fixed layout algorithm.
+ * A no-op if the table is not attached to the document or already locked.
+ *
+ * @param  {HTMLTableElement}  table  The table element
+ */
+function lockColumnWidths (table: HTMLTableElement): void {
+  if (!table.isConnected || table.getAttribute(LOCKED_WIDTHS_ATTRIBUTE) === 'true') {
+    return
+  }
+
+  const firstRowCells = [...table.querySelectorAll<HTMLTableCellElement>('tr:first-child > th, tr:first-child > td')]
+  if (firstRowCells.length === 0) {
+    return
+  }
+
+  // Measure everything before writing any styles so that the reads and writes
+  // do not interleave (which would cause repeated re-layouts).
+  const tableWidth = table.getBoundingClientRect().width
+  const cellWidths = firstRowCells.map(cell => cell.getBoundingClientRect().width)
+
+  for (let i = 0; i < firstRowCells.length; i++) {
+    firstRowCells[i].style.boxSizing = 'border-box'
+    firstRowCells[i].style.width = `${cellWidths[i]}px`
+  }
+
+  // NOTE: `table-layout: fixed` only becomes active with an explicit table
+  // width. Under the fixed algorithm, the column widths follow the first row's
+  // cell widths, regardless of the cells' contents.
+  table.style.tableLayout = 'fixed'
+  table.style.width = `${tableWidth}px`
+  table.setAttribute(LOCKED_WIDTHS_ATTRIBUTE, 'true')
+  table.dataset.lockedColumnCount = String(firstRowCells.length)
+}
+
+/**
+ * Removes the column width lock again, returning the table to the automatic
+ * layout algorithm (i.e., the browser re-fits all columns to their contents).
+ * A no-op if the table is not locked.
+ *
+ * @param  {HTMLTableElement}  table  The table element
+ */
+function unlockColumnWidths (table: HTMLTableElement): void {
+  if (table.getAttribute(LOCKED_WIDTHS_ATTRIBUTE) !== 'true') {
+    return
+  }
+
+  for (const cell of [...table.querySelectorAll<HTMLTableCellElement>('th, td')]) {
+    cell.style.boxSizing = ''
+    cell.style.width = ''
+  }
+
+  table.style.tableLayout = ''
+  table.style.width = ''
+  table.removeAttribute(LOCKED_WIDTHS_ATTRIBUTE)
+  delete table.dataset.lockedColumnCount
+}
+
+/**
+ * Re-fits the table's column widths to their contents (optionally freezing the
+ * resulting widths again), while keeping the on-screen position of the main
+ * selection stationary: The layout shift caused by the re-fit is measured and
+ * compensated by adjusting the scroll position.
+ *
+ * @param  {HTMLTableElement}  table      The table element
+ * @param  {EditorView}        view       The main EditorView
+ * @param  {string}            cacheKey   The table's height cache key
+ * @param  {boolean}           lockAgain  Whether to freeze the new widths
+ *                                        again (true when the user merely
+ *                                        moved on to editing another cell)
+ */
+function refitColumnWidths (table: HTMLTableElement, view: EditorView, cacheKey: string, lockAgain: boolean): void {
+  // The re-fit must happen outside of the current update cycle. Additionally,
+  // when the user moves from one cell to another, the new cell's subview is
+  // mounted in a rAF that updateRow has scheduled before this one, so by the
+  // time this callback runs, the DOM shows the state we want to fit to.
+  requestAnimationFrame(() => {
+    if (!table.isConnected) {
+      return
+    }
+
+    const head = view.state.selection.main.head
+    // NOTE: For positions inside the table, this call resolves through the
+    // widget's `coordsAt` override to the enclosing cell's content rectangle.
+    const coordsBefore = view.coordsAtPos(head)
+
+    unlockColumnWidths(table)
+
+    if (lockAgain) {
+      lockColumnWidths(table)
+    }
+
+    // The re-fit likely changed the table's height: Update the height cache
+    // and have CodeMirror re-measure, mirroring what updateDOM does.
+    TABLE_HEIGHT_CACHE.set(cacheKey, measureWidgetHeight(table))
+
+    const coordsAfter = view.coordsAtPos(head)
+    if (coordsBefore !== null && coordsAfter !== null) {
+      const delta = coordsAfter.top - coordsBefore.top
+      if (delta !== 0) {
+        // Compensate the layout shift so that the cursor stays stationary on
+        // screen.
+        view.scrollDOM.scrollTop += delta
+      }
+    }
+
+    view.requestMeasure()
+  })
 }
 
 /**
@@ -361,6 +570,8 @@ function updateRow (
   let { library } = view.state.field(configField).metadata
   library = library === '' ? CITEPROC_MAIN_DB : library
   const onCitation = window.getCitationCallback(library)
+  // Relative image sources in the cells are resolved against this path
+  const documentPath = view.state.field(configField).metadata.path
 
   for (let i = 0; i < astRow.cells.length; i++) {
     const cell = astRow.cells[i]
@@ -377,7 +588,8 @@ function updateRow (
       const html = nodeToHTML(cell.children, {
         onCitation, zknLinkFormat,
       }, 0).trim()
-      contentWrapper.innerHTML = html.length > 0 ? sanitizeHTML(html) : '&nbsp;'
+      renderCellContents(contentWrapper, html, documentPath)
+      renderCellTaskCheckboxes(contentWrapper, cell.textContent, view)
 
       // NOTE: This handle gets attached once and then remains on the TD for
       // the existence of the table. Since the `view` will always be the same,
@@ -392,7 +604,7 @@ function updateRow (
         event.preventDefault()
         event.stopPropagation()
 
-        setSelectionToCell(td, cell, view)
+        setSelectionToCell(td, event, view)
       })
 
       td.addEventListener('contextmenu', (event) => {
@@ -407,7 +619,7 @@ function updateRow (
         const subview = EditorView.findFromDOM(td)
 
         if (subview === null) {
-          setSelectionToCell(td, cell, view)
+          setSelectionToCell(td, event, view)
         }
 
         displayTableContextMenu(event, view, subview ?? view)
@@ -453,7 +665,8 @@ function updateRow (
       const html = nodeToHTML(cell.children, {
         onCitation, zknLinkFormat,
       }, 0).trim()
-      contentWrapper.innerHTML = html.length > 0 ? sanitizeHTML(html) : '&nbsp;'
+      renderCellContents(contentWrapper, html, documentPath)
+      renderCellTaskCheckboxes(contentWrapper, cell.textContent, view)
       interceptAnchorClicks(contentWrapper, href => openMarkdownLink(href, view))
     } else if (subview === null && selectionInCell) {
       // Before we mount a subview, we need to normalize the selection if
@@ -487,6 +700,9 @@ function updateRow (
 
         // Create a new subview to represent the selection here. Ensure the cell
         // itself is empty before we mount the subview.
+        // NOTE: Forget the rendered contents, so that the cell is re-rendered
+        // once the subview is gone, no matter who destroyed it.
+        forgetCellContents(contentWrapper)
         contentWrapper.innerHTML = ''
         createSubviewForCell(view, contentWrapper, { from: cell.from, to: cell.to })
         contentWrapper.classList.add('editing')
@@ -497,8 +713,11 @@ function updateRow (
       const html = nodeToHTML(cell.children, {
         onCitation, zknLinkFormat,
       }, 0).trim()
-      if (html !== contentWrapper.innerHTML) {
-        contentWrapper.innerHTML = html.length > 0 ? sanitizeHTML(html) : '&nbsp;'
+      // NOTE: Compare against what the cell has been rendered from, since
+      // resolved image sources and task checkboxes alter its inner HTML.
+      if (cellContentsChanged(contentWrapper, html, documentPath)) {
+        renderCellContents(contentWrapper, html, documentPath)
+        renderCellTaskCheckboxes(contentWrapper, cell.textContent, view)
         interceptAnchorClicks(contentWrapper, href => openMarkdownLink(href, view))
       }
     } else if ((subviewFrom !== cell.from || subviewTo !== cell.to) && (columnsChanged || rowsChanged)) {
@@ -521,133 +740,27 @@ function updateRow (
 
 /**
  * Sets the selection into a targeted cell in preparation for instantiating a
- * table editor here. This utility function attempts to set the cursor position
- * as close as possible to the actual mouse cursor click coordinates.
+ * table editor here. The cursor is placed at the position in the cell's
+ * Markdown source that corresponds to the clicked position in the rendered
+ * cell.
  *
- * @param   {HTMLTableCellElement}  td    The table cell element
- * @param   {TableCell}             cell  The table cell contents
- * @param   {EditorView}            view  The editor view
+ * NOTE: The DOM selection cannot be used for this, since the mousedown handler
+ * prevents the default action, so the browser never moves the DOM selection
+ * to the click position.
+ *
+ * @param   {HTMLTableCellElement}  td     The table cell element
+ * @param   {MouseEvent}            event  The mouse event of the click
+ * @param   {EditorView}            view   The editor view
  */
-function setSelectionToCell (td: HTMLTableCellElement, cell: TableCell, view: EditorView): void {
-  const from = parseInt(td.dataset.cellFrom ?? '0', 10)
+function setSelectionToCell (td: HTMLTableCellElement, event: MouseEvent, view: EditorView): void {
+  // NOTE: Read the cell's range and source at the time of the click, since the
+  // listeners outlive any edits to the cell.
+  const cellFrom = parseInt(td.dataset.cellFrom ?? '0', 10)
   const cellTo = parseInt(td.dataset.cellTo ?? '0', 10)
-  const selection = getSelection()
-  const textOffset = selection?.focusOffset ?? 0
-  const nodeOffset = estimateNodeOffset(selection?.anchorNode ?? td, td, cell.textContent)
-  view.dispatch({ selection: { anchor: Math.min(from + nodeOffset + textOffset, cellTo) } })
-}
-
-/**
- * Estimates the offset of the provided `anchorNode` within a table cell element
- * in terms of Markdown source code that may have been used to generate the DOM
- * tree. NOTE: This is merely an estimation, since the function is only used to
- * roughly place the cursor where it should be within the Markdown source. If
- * the substring is unique within `cellContent`, returns the precise beginning
- * of the node's value, so that the value returned from this function plus the
- * selection `focusOffset` are an exact substring (except there are too many
- * spaces in front of this table cell).
- *
- * @param   {Node}                  anchorNode   The clicked node
- * @param   {HTMLTableCellElement}  td           The surrounding TD
- * @param   {string}                cellContent  The Markdown source
- *
- * @return  {number}                             An estimated offset of
- *                                               `anchorNode` within `td`
- */
-function estimateNodeOffset (anchorNode: Node, td: HTMLTableCellElement, cellContent: string): number {
-  // BUG: Somehow this function returns numbers that are WAY too high, there is
-  // still some bug in here. I can reproduce this sometimes in empty cells/an
-  // empty table, but I couldn't find a specific pattern yet.
-  if (anchorNode === td || anchorNode.parentNode === td) {
-    // Clicked node was the target itself, but realistically this doesn't happen
-    return 0
-  }
-
-  // If the anchorNode is a text node, and the text content of that anchor is
-  // unique within the table cell's content, then we can calculate the correct
-  // offset and return that one.
-  if (anchorNode instanceof Text && anchorNode.nodeValue !== null) {
-    const firstIdx = cellContent.indexOf(anchorNode.nodeValue)
-    const lastIdx = cellContent.lastIndexOf(anchorNode.nodeValue)
-
-    if (firstIdx > -1 && firstIdx === lastIdx) { // --> Unique substring
-      return firstIdx
-    }
-  }
-
-  // If we're here, the anchor's substring was not unique, so we have to instead
-  // use the DOM of the table cell's HTML sub tree to estimate the offset as
-  // good as possible.
-
-  let nodeOffset = 0
-  // Here we assume that we're somewhere in the td's sub-tree. We'll start
-  // navigating node by node backwards until we end up at the td.
-  let currentNode = anchorNode
-  while (currentNode !== td) {
-    if (currentNode.previousSibling !== null ) {
-      currentNode = currentNode.previousSibling
-    } else if (currentNode.parentNode !== null) {
-      currentNode = currentNode.parentNode
-      // The parentNode includes all the children we may have already went
-      // through so we have to immediately select the previous sibling of it.
-      if (currentNode.previousSibling === null) {
-        break // Shouldn't happen, but who knows
-      } else {
-        currentNode = currentNode.previousSibling
-      }
-    } else {
-      break // Something went wrong ...?
-    }
-
-    if (currentNode instanceof Text) {
-      // Simple text node -> offset increases by its nodeValue
-      nodeOffset += currentNode.nodeValue?.length ?? 0
-    } else if (currentNode instanceof Element) {
-      // Element node --> offset increases by its textContent as well as a rough
-      // formatting character estimation
-      nodeOffset += currentNode.textContent?.length ?? 0
-      nodeOffset += guessFormattingCharsFor(currentNode)
-    }
-  }
-
-  return nodeOffset
-}
-
-/**
- * Takes an HTML element and estimates the possible number of formatting
- * characters needed to generate this HTML from some Markdown code. NOTE: This
- * excludes block elements as it is intended to serve as an estimator for
- * table cells in pipe tables which do not support block elements in their
- * content.
- *
- * @param   {Element}  element  The element to estimate for
- *
- * @return  {number}            A guess of how many formatting characters the
- *                              Markdown source used.
- */
-function guessFormattingCharsFor (element: Element): number {
-  let chars = 0
-
-  // This function should count anything that is not included in `textContent`
-
-  // Simple inlines
-  chars += element.querySelectorAll('strong').length * 4
-  chars += element.querySelectorAll('em').length * 2
-  chars += element.querySelectorAll('mark').length * 4
-
-  // Links and images have 4/5 formatting characters plus however long the href
-  // or src is.
-  for (const a of element.querySelectorAll('a')) {
-    chars += a.getAttribute('href')?.length ?? 0 + 4
-  }
-  for (const img of element.querySelectorAll('img')) {
-    chars += img.getAttribute('src')?.length ?? 0 + 5
-  }
-
-  // NOTE: Headings and other block-level nodes are ignored because they can't
-  // occur in pipe tables. We may have to add that functionality later should it
-  // turn out that our guesses are way too bad. Because a few block level
-  // elements (such as lists etc.) can occur at least in grid tables.
-
-  return chars
+  const source = view.state.sliceDoc(cellFrom, cellTo)
+  const contentWrapper = td.querySelector<HTMLElement>('div.content')
+  const offset = contentWrapper !== null
+    ? sourceOffsetForCellClick(contentWrapper, source, event.clientX, event.clientY)
+    : source.length
+  view.dispatch({ selection: { anchor: Math.min(cellFrom + offset, cellTo) } })
 }

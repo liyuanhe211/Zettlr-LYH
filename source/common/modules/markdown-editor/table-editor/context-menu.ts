@@ -6,11 +6,13 @@ import { applyBold, applyItalic, insertLink } from '../commands/markdown'
 import { copyAsHTML, copyAsPlain, cut, paste, pasteAsPlain } from '../util/copy-paste-cut'
 import { selectAllCommand } from '../keymaps/table-editor'
 import { addRowAfter, addRowBefore, clearRow, deleteRow, swapNextRow, swapPrevRow } from './commands/rows'
+import { copyTableRow, pasteTableRow } from './commands/row-clipboard'
 import { addColAfter, addColBefore, clearCol, deleteCol, swapNextCol, swapPrevCol } from './commands/columns'
 import { clearTable, deleteTable, setAlignment } from './commands/tables'
 import { type EditorShortcutName, getCustomShortcut } from '../keymaps/shortcuts'
 import { configField } from '../util/configuration'
 import { cmShortcutToElectron } from 'source/common/util/shortcuts'
+import { getPandocAttributeSection } from '../context-menu/pandoc-attribute-menu'
 
 export function displayTableContextMenu (event: MouseEvent, mainView: EditorView, subviewOrView: EditorView): void {
   const config = mainView.state.field(configField, false)
@@ -124,6 +126,17 @@ export function displayTableContextMenu (event: MouseEvent, mainView: EditorView
         { type: 'separator' },
         {
           type: 'normal',
+          label: trans('Copy row'),
+          action () { copyTableRow(mainView) }
+        },
+        {
+          type: 'normal',
+          label: trans('Paste row'),
+          action () { pasteTableRow(mainView) }
+        },
+        { type: 'separator' },
+        {
+          type: 'normal',
           label: trans('Clear row'),
           action () { clearRow(mainView) }
         },
@@ -228,5 +241,11 @@ export function displayTableContextMenu (event: MouseEvent, mainView: EditorView
   ]
 
   const point = { x: event.clientX, y: event.clientY }
+
+  // Pandoc attribute section (only in Pandoc mode). Subviews hold the whole
+  // document, so their selection is in main document coordinates.
+  const { from, to } = subviewOrView.state.selection.main
+  template.push(...getPandocAttributeSection(mainView, { from, to }, point))
+
   showPopupMenu(point, template)
 }
