@@ -20,8 +20,9 @@ import { undo, redo } from '@codemirror/commands'
 import { type Extension } from '@codemirror/state'
 import { type EditorView, keymap } from '@codemirror/view'
 import { addColAfter, addColBefore, moveNextCell, movePrevCell, swapNextCol, swapPrevCol } from '../table-editor/commands/columns'
-import { addRowAfter, addRowBefore, moveNextRow, movePrevRow, swapNextRow, swapPrevRow } from '../table-editor/commands/rows'
+import { addRowAfter, addRowBefore, movePrevRow, swapNextRow, swapPrevRow } from '../table-editor/commands/rows'
 import { hiddenSpanField } from '../table-editor/subview'
+import { insertCellLineBreak, moveAcrossCellBoundary } from '../table-editor/cell-navigation'
 import { zettlrKeymap } from '.'
 import { type CustomEditorShortcut, type EditorShortcutName, getCustomShortcut } from './shortcuts'
 import { setAlignment } from '../table-editor/commands/tables'
@@ -74,15 +75,24 @@ export function tableEditorKeymap (mainView: EditorView, customShortcutMap: Cust
     // keymap to make them work within table editors.
     keymap.of([
       // Prevent programmatic insertion of newlines by disabling some
-      // keybindings (except Enter which should move the cursor to the next
-      // row if possible)
+      // keybindings. Enter inserts a line break (`<br>`) into the cell instead.
       {
         key: 'Enter',
-        // NOTE: "?? true" ensures no other keybinding will be called after this.
-        // This prevents the default behavior of inserting a newline character.
-        run: _v => moveNextRow(mainView) ?? true,
-        shift: _v => movePrevRow(mainView) ?? true
+        run: insertCellLineBreak,
+        // NOTE: Always return true, so that no other keybinding will be called
+        // after this, even in the first row. This prevents the default behavior
+        // of inserting a newline character.
+        shift: _v => {
+          movePrevRow(mainView)
+          return true
+        }
       },
+      // The arrow keys move within the cell, and on to the neighboring cell (or
+      // out of the table) once they reach the cell's boundary.
+      { key: 'ArrowLeft', run: v => moveAcrossCellBoundary(mainView, v, v.state.field(hiddenSpanField).cellRange, 'left') },
+      { key: 'ArrowRight', run: v => moveAcrossCellBoundary(mainView, v, v.state.field(hiddenSpanField).cellRange, 'right') },
+      { key: 'ArrowUp', run: v => moveAcrossCellBoundary(mainView, v, v.state.field(hiddenSpanField).cellRange, 'up') },
+      { key: 'ArrowDown', run: v => moveAcrossCellBoundary(mainView, v, v.state.field(hiddenSpanField).cellRange, 'down') },
       // Same for these two commands which disables these keybindings.
       { key: 'Ctrl-Enter', run: _v => true },
       { key: 'Mod-Enter', run: _v => true },
