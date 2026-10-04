@@ -6,3 +6,5 @@
 !templates
 !.gitignore
 !NSIS
+# Zettlr-LYH: the resident Python worker of the Pandoc PPTX preview
+!pptx-preview
