@@ -29,28 +29,13 @@ import { getAppServiceContainer, isAppServiceContainerReady } from './app/app-se
 
 handleExitArguments()
 
-// Immediately after launch, check if there is already another instance of
-// Zettlr running, and, if so, exit immediately. The arguments (including files)
-// from this instance will already be passed to the first instance.
-if (!app.requestSingleInstanceLock()) {
-  if (!app.isPackaged) {
-    // I always forget to close my system install before starting the
-    // development app, so let's just add a small reminder to myself.
-    console.log('There is another instance of Zettlr running. Did you forget to close that one?')
-  }
-  app.exit(0)
-}
-
-// If we reach this point, we are now booting the first instance of Zettlr.
-
-// To show notifications properly on Windows, we must manually set the appUserModelID
-// See https://www.electronjs.org/docs/tutorial/notifications#windows
-if (process.platform === 'win32') {
-  app.setAppUserModelId('com.zettlr.app')
-}
-
 // Setting custom data dir for user configuration files.
 // Full path or relative path is OK. '~' does not work as expected.
+// NOTE: This must happen BEFORE the single instance lock is requested below,
+// since the lock lives inside the userData directory: An instance with a
+// custom data dir (e.g., the development sandbox started via `yarn start`)
+// must not conflict with an instance using the default directory (e.g., a
+// regular Zettlr installation running alongside).
 let dataDir = getCLIArgument(DATA_DIR)
 
 if (typeof dataDir === 'string') {
@@ -72,6 +57,30 @@ if (typeof dataDir === 'string') {
   app.setAppLogsPath(path.join(dataDir, 'logs'))
 }
 
+// Immediately after launch, check if there is already another instance of
+// Zettlr running, and, if so, exit immediately. The arguments (including files)
+// from this instance will already be passed to the first instance.
+if (!app.requestSingleInstanceLock()) {
+  if (!app.isPackaged) {
+    // I always forget to close my system install before starting the
+    // development app, so let's just add a small reminder to myself.
+    console.log('There is another instance of Zettlr running. Did you forget to close that one?')
+  }
+  app.exit(0)
+}
+
+// If we reach this point, we are now booting the first instance of Zettlr.
+
+// To show notifications properly on Windows, we must manually set the appUserModelID
+// See https://www.electronjs.org/docs/tutorial/notifications#windows
+// NOTE: This fork deliberately uses an ID of its own instead of upstream's
+// 'com.zettlr.app'. Windows groups taskbar buttons by this ID, so keeping the
+// upstream ID would throw this sandbox's window into the same taskbar group as
+// a regular Zettlr installation running alongside it.
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.zettlr.lyh.app')
+}
+
 // On systems with virtual GPUs (i.e. VMs), it might be necessary to disable
 // hardware acceleration. If the corresponding flag is set, we do so.
 // See for more info https://github.com/Zettlr/Zettlr/issues/2127
@@ -86,7 +95,22 @@ if (getCLIArgument(DISABLE_HARDWARE_ACCELERATION) === true) {
 // emitted before the app is ready and the service container object has been
 // instantiated. This is why we need to cache those in this array. After the app
 // is booted, we won't need this anymore.
+// NOTE: This fork also collects files here that arrive via its Zettlr_LYH.exe
+// launcher (see below and the `second-instance` handler).
 const filesBeforeOpen: string[] = []
+
+// NOTE: This fork's Zettlr_LYH.exe launcher, which Windows' "Open with" calls
+// with the file to open, starts this development sandbox through a chain of
+// nested command lines (cmd, corepack, yarn, cross-env, another cmd,
+// electron-forge) whose quoting would mangle file paths passed as arguments.
+// It therefore hands the files over in this environment variable, separated
+// by "|" (a character Windows forbids in paths). The variable is removed so
+// that a relaunched app does not open the same files again.
+const launcherFiles = process.env.ZETTLR_LYH_FILES_TO_OPEN
+if (launcherFiles !== undefined) {
+  filesBeforeOpen.push(...extractFilesFromArgv(launcherFiles.split('|')))
+  delete process.env.ZETTLR_LYH_FILES_TO_OPEN
+}
 
 /**
  * This variable is being used to determine if all service providers have
@@ -138,6 +162,10 @@ app.whenReady().then(() => {
  */
 app.on('second-instance', (event, argv, _cwd) => {
   if (!isAppServiceContainerReady()) {
+    // NOTE: Upstream drops the files here. This fork's Zettlr_LYH.exe launcher
+    // may hand files over while the app is still booting (e.g., when several
+    // files are opened from Explorer at once), so keep them for after boot.
+    filesBeforeOpen.push(...extractFilesFromArgv(argv))
     return
   }
 
