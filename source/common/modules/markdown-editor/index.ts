@@ -54,6 +54,7 @@ import {
 import {
   type CoreExtensionOptions,
   getJSONExtensions,
+  getJSONLExtensions,
   getMarkdownExtensions,
   getTexExtensions,
   getYAMLExtensions,
@@ -75,7 +76,8 @@ import {
   applyTaskList,
   insertImage,
   insertLink,
-  applyPandocDivOrSpan
+  applyPandocDivOrSpan,
+  applyPandocColumns
 } from './commands/markdown'
 import { addNewFootnote } from './commands/footnotes'
 
@@ -99,8 +101,11 @@ import { editorMetadataFacet } from './plugins/editor-metadata'
 import { projectInfoUpdateEffect, type ProjectInfo } from './plugins/project-info-field'
 import { moveSection } from './commands/move-section'
 import { parsePandocAttributes } from 'source/common/pandoc-util/parse-pandoc-attributes'
+import type { PandocAttributeTarget } from 'source/common/pandoc-util/pandoc-attribute-schema'
+import { applyPandocAttributeUpdates, findPandocAttributeTargetsNear, type PandocAttributeKindUpdate } from './context-menu/pandoc-attribute-menu'
 import { closeSearchPanel, openSearchPanel, searchPanelOpen } from '@codemirror/search'
 import { clickListeners } from './plugins/click-listeners'
+import { findViewportAnchor } from './plugins/preserve-scroll-anchor'
 
 export interface DocumentWrapper {
   path: string
@@ -356,6 +361,8 @@ export default class MarkdownEditor extends EventEmitter {
         return getYAMLExtensions(options)
       case DocumentType.JSON:
         return getJSONExtensions(options)
+      case DocumentType.JSONL:
+        return getJSONLExtensions(options)
     }
   }
 
@@ -434,10 +441,46 @@ export default class MarkdownEditor extends EventEmitter {
 
   /**
    * This function allows to reload the full editor contents. This is useful if
-   * a setting has changed that requires extensions to be fully reloaded.
+   * a setting has changed that requires extensions to be fully reloaded, or if
+   * the document has been changed on disk. Since this recreates the entire
+   * editor state, the scroll position would normally be lost; therefore this
+   * method restores the cursor and keeps the viewport visually stable: if the
+   * cursor was visible before the reload, it is kept at the same height on
+   * screen; otherwise, the line at one third of the viewport height is kept
+   * stationary.
    */
   async reload (): Promise<void> {
+    // Capture the cursor and the viewport anchor (line/column based, since the
+    // new state may contain different content and character offsets would be
+    // meaningless).
+    const oldDocument = this._instance.state.doc
+    const toLineAndColumn = (position: number): { line: number, column: number } => {
+      const line = oldDocument.lineAt(position)
+      return { line: line.number, column: position - line.from }
+    }
+
+    const cursor = toLineAndColumn(this._instance.state.selection.main.head)
+    const viewportAnchor = findViewportAnchor(this._instance)
+    const anchor = viewportAnchor !== null
+      ? { ...toLineAndColumn(viewportAnchor.position), rowTop: viewportAnchor.rowTop }
+      : null
+
     await this.loadDocument()
+
+    // Restore the cursor and the viewport anchor onto the new state, clamping
+    // line and column into the bounds of the new content.
+    const newDocument = this._instance.state.doc
+    const toPosition = (target: { line: number, column: number }): number => {
+      const line = newDocument.line(Math.max(1, Math.min(target.line, newDocument.lines)))
+      return line.from + Math.min(target.column, line.length)
+    }
+
+    const effects: Array<StateEffect<any>> = []
+    if (anchor !== null) {
+      effects.push(EditorView.scrollIntoView(toPosition(anchor), { y: 'start', yMargin: anchor.rowTop }))
+    }
+
+    this._instance.dispatch({ selection: { anchor: toPosition(cursor) }, effects })
   }
 
   /**
@@ -609,6 +652,9 @@ export default class MarkdownEditor extends EventEmitter {
       case 'markdownMakeTaskList':
         applyTaskList(this._instance)
         break
+      case 'markdownPandocColumns':
+        applyPandocColumns(this._instance)
+        break
       default:
         console.warn('Unimplemented command:', cmd)
     }
@@ -637,6 +683,39 @@ export default class MarkdownEditor extends EventEmitter {
    */
   insertPandocDivOrSpan (type: 'div'|'span', attributes: string): void {
     applyPandocDivOrSpan(this._instance, type, parsePandocAttributes(attributes))
+  }
+
+  /**
+   * Returns the objects whose Pandoc attributes can be edited around the given
+   * range (default: the main selection), innermost first, together with the
+   * range they were found for.
+   *
+   * @param   {number}  from  Optional range start
+   * @param   {number}  to    Optional range end
+   *
+   * @return  {{ from: number, to: number, targets: PandocAttributeTarget[] }}
+   */
+  getPandocAttributeTargets (from?: number, to?: number): { from: number, to: number, targets: PandocAttributeTarget[] } {
+    const main = this._instance.state.selection.main
+    const rangeFrom = Math.min(from ?? main.from, this._instance.state.doc.length)
+    const rangeTo = Math.min(to ?? main.to, this._instance.state.doc.length)
+    return {
+      from: rangeFrom,
+      to: rangeTo,
+      targets: findPandocAttributeTargetsNear(this._instance.state, rangeFrom, rangeTo)
+    }
+  }
+
+  /**
+   * Writes Pandoc attribute updates for the objects around the range back into
+   * the document in one transaction.
+   *
+   * @param   {number}                       from     Range start
+   * @param   {number}                       to       Range end
+   * @param   {PandocAttributeKindUpdate[]}  updates  At most one update per kind
+   */
+  applyPandocAttributeUpdates (from: number, to: number, updates: PandocAttributeKindUpdate[]): void {
+    applyPandocAttributeUpdates(this._instance, from, to, updates)
   }
 
   /**
