@@ -14,7 +14,7 @@
  */
 
 import type ConfigProvider from '@providers/config'
-import { type BrowserWindowConstructorOptions, nativeTheme } from 'electron'
+import { type BrowserWindowConstructorOptions, app, nativeTheme } from 'electron'
 import path from 'path'
 import { getSystemColors } from '@common/util/get-system-colors'
 
@@ -70,5 +70,9 @@ export default function setWindowChrome (config: ConfigProvider, winConf: Browse
   // Application icon for Linux. Cannot be embedded in the executable.
   if (process.platform === 'linux') {
     winConf.icon = path.join(__dirname, 'assets/icons/png/128x128.png')
+  } else if (process.platform === 'win32' && !app.isPackaged) {
+    // NOTE: Unpackaged (`yarn start`), the window belongs to electron.exe, so
+    // the title bar and taskbar would show Electron's icon instead of Zettlr's.
+    winConf.icon = path.join(__dirname, 'assets/icons/icon.ico')
   }
 }
