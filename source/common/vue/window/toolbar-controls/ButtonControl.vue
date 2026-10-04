@@ -3,7 +3,9 @@
     <button
       v-bind:id="`toolbar-${control.id ?? ''}`"
       role="button"
+      v-bind:class="control.class"
       v-bind:title="titleWithFallback"
+      v-bind:aria-pressed="control.pressed"
     >
       <cds-icon
         v-if="control.icon"
@@ -43,6 +45,15 @@ export interface ToolbarButtonControl {
   title?: string
   label?: string
   icon: string
+  /**
+   * Optional CSS class(es) put verbatim on the button element
+   */
+  class?: string
+  /**
+   * When given, the button behaves as a checkable push button and exposes this
+   * state as aria-pressed
+   */
+  pressed?: boolean
   badge?: boolean
   direction?: 'up'|'down'|'left'|'right'
   // Allow arbitrary properties that we ignore

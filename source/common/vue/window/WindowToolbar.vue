@@ -243,6 +243,14 @@ body div#toolbar {
   button {
     cursor: pointer;
   }
+
+  // Text buttons of a toolbar share one minimum width (design language:
+  // buttons visible together are equal-width). A label longer than that, such
+  // as Insert Two Columns, widens its own button only, which keeps the crowded
+  // main toolbar from growing by the same amount for every text button.
+  button.toolbar-text-button {
+    min-width: 100px;
+  }
 }
 
 body.darwin {
@@ -277,6 +285,19 @@ body.darwin {
       &:hover, &.toolbar-overflow {
         background-color: rgb(230, 230, 230);
       }
+    }
+
+    // Icon buttons occupy a fixed square; the toolbar's text buttons carry
+    // .toolbar-text-button and size to their label instead. The min-width
+    // matters: generic.css gives every Windows button min-width 50px.
+    button:not(.toolbar-text-button) {
+      width: 28px;
+      min-width: 28px;
+      height: 28px;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
   }
 
@@ -316,6 +337,19 @@ body.win32 {
       &:hover, &.toolbar-overflow {
         background-color: rgb(230, 230, 230);
       }
+    }
+
+    // Icon buttons occupy a fixed square; the toolbar's text buttons carry
+    // .toolbar-text-button and size to their label instead. The min-width
+    // matters: generic.css gives every Windows button min-width 50px.
+    button:not(.toolbar-text-button) {
+      width: 28px;
+      min-width: 28px;
+      height: 28px;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
   }
 
