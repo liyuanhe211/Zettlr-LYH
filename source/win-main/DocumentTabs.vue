@@ -4,6 +4,7 @@
       'document-tablist-wrapper': true,
       'scrollers-active': showScrollers
     }"
+    v-on:wheel="handleWheel"
   >
     <!-- Left scroller arrow -->
     <div v-if="showScrollers" class="scroller left" v-on:click="scrollLeft()">
@@ -104,6 +105,7 @@ import { closeFile } from './file-manager/util/item-composable'
 import getDocumentTitle from './util/get-document-title'
 import { hasMarkdownExt } from '@common/util/file-extention-checks'
 import { markdownContainsFormulas } from '@common/modules/markdown-utils/formula-calculated-export'
+import { exportToHTMLAndShow } from './util/export-document-to-html'
 
 const ipcRenderer = window.ipc
 
@@ -350,6 +352,33 @@ function scrollRight (): void {
   }
 }
 
+/**
+ * Lets the (vertical) mouse wheel scroll the tabbar horizontally whenever the
+ * tabs overflow the available width.
+ *
+ * @param   {WheelEvent}  event  The wheel event
+ */
+function handleWheel (event: WheelEvent): void {
+  if (container.value === null || event.ctrlKey || event.metaKey) {
+    return // Leave zooming and similar gestures alone
+  }
+
+  const { scrollWidth, clientWidth } = container.value
+  if (scrollWidth <= clientWidth) {
+    return // Nothing to scroll
+  }
+
+  // Horizontal wheel movements (touchpads, tilt wheels) scroll natively
+  if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) {
+    return
+  }
+
+  event.preventDefault()
+  // NOTE: The container has `scroll-behavior: smooth`, which would animate
+  // every single wheel step and make consecutive steps lag behind.
+  container.value.scrollBy({ left: event.deltaY, behavior: 'instant' })
+}
+
 function hasDuplicate (doc: OpenDocument): boolean {
   const focalTabname = getDocumentTitle(doc).toLowerCase()
   const duplicates = openFiles.value.filter(doc => {
@@ -455,10 +484,11 @@ function handleTabbarContext (event: MouseEvent): void {
 }
 
 async function handleContextMenu (event: MouseEvent, doc: OpenDocument): Promise<void> {
+  // NOTE: The descriptor can be legitimately absent from the map (store still
+  // loading, file outside any loaded workspace, or the map being rebuilt).
+  // The menu must still show in that case; almost every item only needs
+  // doc.path, so only the descriptor-dependent items are gated below.
   const descriptor = workspaceStore.descriptorMap.get(doc.path)
-  if (descriptor === undefined || descriptor.type === 'directory') {
-    return
-  }
 
   // The formula-calculated export item is only offered for Markdown files
   // whose saved contents actually contain double-bracket formulas.
@@ -486,7 +516,7 @@ async function handleContextMenu (event: MouseEvent, doc: OpenDocument): Promise
       action () {
         ipcRenderer.invoke('documents-provider', {
           command: 'close-file',
-          payload: { path: descriptor.path, leafId: props.leafId, windowId: props.windowId }
+          payload: { path: doc.path, leafId: props.leafId, windowId: props.windowId }
         } satisfies DocumentManagerIPCAPI).catch(e => console.error(e))
       }
     },
@@ -495,7 +525,7 @@ async function handleContextMenu (event: MouseEvent, doc: OpenDocument): Promise
       type: 'normal',
       action () {
         for (const openFile of openFiles.value) {
-          if (openFile.path === descriptor.path) {
+          if (openFile.path === doc.path) {
             continue
           }
 
@@ -560,14 +590,14 @@ async function handleContextMenu (event: MouseEvent, doc: OpenDocument): Promise
       label: trans('Copy filename'),
       type: 'normal',
       action () {
-        navigator.clipboard.writeText(descriptor.name).catch(err => console.error(err))
+        navigator.clipboard.writeText(pathBasename(doc.path)).catch(err => console.error(err))
       }
     },
     {
       label: trans('Copy path'),
       type: 'normal',
       action () {
-        navigator.clipboard.writeText(descriptor.path).catch(err => console.error(err))
+        navigator.clipboard.writeText(doc.path).catch(err => console.error(err))
       }
     },
     {
@@ -576,16 +606,16 @@ async function handleContextMenu (event: MouseEvent, doc: OpenDocument): Promise
       action () {
         ipcRenderer.send('window-controls', {
           command: 'show-item-in-folder',
-          payload: { itemPath: descriptor.path }
+          payload: { itemPath: doc.path }
         } satisfies WindowControlsIPCAPI)
       }
     },
     {
       label: trans('Copy ID'),
       type: 'normal',
-      enabled: descriptor.type === 'file' && descriptor.id !== '',
+      enabled: descriptor?.type === 'file' && descriptor.id !== '',
       action () {
-        if (descriptor.type === 'file' && descriptor.id !== '') {
+        if (descriptor?.type === 'file' && descriptor.id !== '') {
           navigator.clipboard.writeText(descriptor.id).catch(err => console.error(err))
         }
       }
@@ -596,16 +626,28 @@ async function handleContextMenu (event: MouseEvent, doc: OpenDocument): Promise
     {
       label: trans('Close file'),
       type: 'normal',
-      enabled: workspaceStore.rootDescriptors.includes(descriptor),
+      enabled: descriptor !== undefined && workspaceStore.rootDescriptors.includes(descriptor),
       action () {
-        closeFile(descriptor.path)
+        closeFile(doc.path)
       }
     },
   ]
 
-  if (documentHasFormulas) {
+  if (hasMarkdownExt(doc.path)) {
     items.push(
       { type: 'separator' },
+      {
+        label: 'Export to HTML',
+        type: 'normal',
+        action () {
+          exportToHTMLAndShow(doc.path).catch(e => console.error(e))
+        }
+      }
+    )
+  }
+
+  if (documentHasFormulas) {
+    items.push(
       {
         // Exports a copy in which every double-bracket formula is replaced
         // by its computed outcome, viewable in any other Markdown viewer.
