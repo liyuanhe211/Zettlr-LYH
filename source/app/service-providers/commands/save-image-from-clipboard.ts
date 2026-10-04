@@ -7,19 +7,24 @@
  * Maintainer:      Hendrik Erz
  * License:         GNU GPL v3
  *
- * Description:     This command saves an image from clipboard.
+ * Description:     This command saves an image from clipboard into the
+ *                  "_Images" folder next to the document, without asking.
  *
  * END HEADER
  */
 
 import ZettlrCommand from './zettlr-command'
 import { trans } from '@common/i18n-main'
-import sanitize from 'sanitize-filename'
 import path from 'path'
 import md5 from 'md5'
 import { promises as fs } from 'fs'
-import { clipboard, ipcMain, nativeImage } from 'electron'
+import { clipboard, nativeImage } from 'electron'
 import { showNativeNotification } from '@common/util/show-notification'
+import {
+  buildCandidateFileName,
+  buildPastedImageDirectory,
+  derivePastedImageFileName
+} from '@common/util/paste-image-path'
 import type { AppServiceContainer } from 'source/app/app-service-container'
 
 export interface SaveImageFromClipboardAPI {
@@ -28,6 +33,19 @@ export interface SaveImageFromClipboardAPI {
   imageData: string // base64 encoded image data
 }
 
+/**
+ * The payload the editor context menu's "Paste" action sends (see
+ * copy-paste-cut.ts): it only names the document directory as `startPath` and
+ * leaves reading the image to main.
+ */
+interface ContextMenuPastePayload {
+  startPath?: string
+}
+
+/**
+ * The result of the (no longer used) paste image dialog. It is kept because
+ * the window manager's showPasteImageModal still references this type.
+ */
 export interface PasteModalResult {
   targetDir: string
   name: string
@@ -35,121 +53,146 @@ export interface PasteModalResult {
   height: string
 }
 
+/**
+ * Upper bound of numbered alternatives tried when the file name is taken.
+ */
+const MAXIMUM_NAME_ATTEMPTS = 10000
+
 export default class SaveImage extends ZettlrCommand {
   constructor (app: AppServiceContainer) {
     super(app, 'save-image-from-clipboard')
   }
 
   /**
-   * Takes an image provided for by the renderer and displays a dialog to the
-   * user asking for some settings to save the image. Afterwards, returns back
-   * to the renderer the absolute path to the image.
+   * Takes an image provided for by the renderer (or, if none is provided, the
+   * image in the clipboard) and saves it into the "_Images" folder next to the
+   * document, creating the folder if necessary. Returns the absolute path to
+   * the saved image, or undefined if nothing was saved (the reason is then
+   * shown to the user as a notification).
    *
    * @param   {string}  evt  The event name
    * @param   {any}     arg  Options on the image
    * @return  {string}       The absolute path to the saved image
    */
-  async run (evt: string, arg: SaveImageFromClipboardAPI): Promise<string|undefined> {
-    const defaultPath = this._app.config.get().editor.defaultSaveImagePath
-    const startPath = path.resolve(arg.basePath, defaultPath)
-    let image = nativeImage.createFromDataURL(arg.imageData)
+  async run (evt: string, arg: Partial<SaveImageFromClipboardAPI> & ContextMenuPastePayload): Promise<string|undefined> {
+    const documentDirectory = arg.basePath ?? arg.startPath ?? ''
 
-    // When the user takes a screenshot into the clipboard and pastes that, the
-    // Chromium API sets the "file"'s name to a generic "image.png". In that
-    // case we want to provide a unique one. See #5449
-    if (arg.imageName === 'image.png') {
-      arg.imageName = undefined
+    // A document that has never been saved has no directory to save into.
+    if (!path.isAbsolute(documentDirectory)) {
+      this.notify(trans('Please save the document before pasting an image.'))
+      return undefined
     }
 
-    // The paste image modal will request the image's data once after it has
-    // been loaded.
-    // NOTE: We must implement this logic here in main which will (a) save the
-    // ridiculous amount of code it takes to get that exact information with
-    // only browser APIs, and (b) circumvent permission issues (since in the
-    // browser, reading from clipboard often requires the user to do something).
-    ipcMain.handleOnce('paste-image-retrieve-data', (event) => {
-      const text = clipboard.readText()
-
-      const dataUrl = arg.imageData
-
-      let name = ''
-      if (arg.imageName !== undefined) {
-        name = arg.imageName // Caller has provided a name
-      } else if (text.length > 0) {
-        // If you copy an image from the web, the browser sometimes inserts
-        // the original URL to it as text into the clipboard. In this case
-        // we've already got a good image name!
-        const basename = path.basename(text, path.extname(text))
-        name = basename + '.png'
-      } else {
-        // In case there is no potential basename we could extract, simply
-        // hash the dataURL. This way we can magically also prevent the same
-        // image to be saved twice in the same directory. Such efficiency!
-        name = md5('img' + dataUrl) + '.png'
+    try {
+      const directoryStat = await fs.stat(documentDirectory)
+      if (!directoryStat.isDirectory()) {
+        throw new Error(`Not a directory: ${documentDirectory}`)
       }
-      return { dataUrl, name, size: image.getSize(), aspect: image.getAspectRatio() }
+    } catch (err: any) {
+      this._app.log.error(`[Application] Cannot paste image: The document directory ${documentDirectory} was not found.`, err)
+      this.notify(trans('Could not paste the image: The folder of the document was not found.'))
+      return undefined
+    }
+
+    const hasImageData = arg.imageData !== undefined && arg.imageData !== ''
+    const image = hasImageData
+      ? nativeImage.createFromDataURL(arg.imageData as string)
+      : clipboard.readImage()
+
+    if (image.isEmpty()) {
+      this.notify(trans('Could not paste the image: The clipboard does not contain a readable image.'))
+      return undefined
+    }
+
+    const dataUrl = hasImageData ? arg.imageData as string : image.toDataURL()
+
+    // Same naming rules as the former paste image dialog. Hashing the data URL
+    // gives identical images identical names, so pasting the same image twice
+    // reuses the existing file (see below).
+    const fileName = derivePastedImageFileName({
+      providedName: arg.imageName,
+      clipboardText: clipboard.readText(),
+      contentHash: md5('img' + dataUrl)
     })
 
-    const target = await this._app.windows.showPasteImageModal(startPath)
-    if (target === undefined) {
-      this._app.log.info('[Application] Aborted image pasting process.')
-      return
-    }
+    const imageDirectory = buildPastedImageDirectory(documentDirectory)
+    const imageBuffer = path.extname(fileName).toLowerCase() === '.jpg'
+      ? image.toJPEG(100)
+      : image.toPNG()
 
-    // First check the name for sanity
-    let targetFile = sanitize(target.name, { replacement: '-' })
-
-    // A file must be opened and active, and the name valid
-    if (targetFile === '') {
-      showNativeNotification(trans('The provided name did not contain any allowed letters.'))
-    }
-
-    // Now check the extension of the name (some users may
-    // prefer to choose to provide it already)
-    if (![ '.png', '.jpg' ].includes(path.extname(targetFile).toLowerCase())) {
-      targetFile += '.png'
-    }
-
-    // Now resolve the path correctly, taking into account a potential relative
-    // path the user has chosen.
-
-    // Now we need to make sure the directory exists.
     try {
-      await fs.lstat(target.targetDir)
-    } catch (err) {
-      await fs.mkdir(target.targetDir, { recursive: true })
+      await fs.mkdir(imageDirectory, { recursive: true })
+
+      for (let attempt = 0; attempt < MAXIMUM_NAME_ATTEMPTS; attempt++) {
+        const candidatePath = path.join(imageDirectory, buildCandidateFileName(fileName, attempt))
+        const existing = await this.readExistingFile(candidatePath)
+
+        if (existing === 'free') {
+          // The "wx" flag fails instead of overwriting if another paste has
+          // claimed the name in the meantime; then simply try the next one.
+          try {
+            await fs.writeFile(candidatePath, imageBuffer, { flag: 'wx' })
+          } catch (err: any) {
+            if (err?.code === 'EEXIST') {
+              continue
+            }
+            throw err
+          }
+          this._app.log.info(`[Application] Saved pasted image to ${candidatePath}`)
+          return candidatePath
+        } else if (existing !== 'occupied' && existing.equals(imageBuffer)) {
+          // The very same image already exists under this name: reuse it.
+          this._app.log.info(`[Application] Pasted image already exists at ${candidatePath}; reusing it.`)
+          return candidatePath
+        }
+        // Otherwise the name is taken by a different file: try the next one.
+      }
+
+      throw new Error(`No free file name found for ${fileName} in ${imageDirectory}`)
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err)
+      this._app.log.error(`[Application] Could not save pasted image: ${message}`, err)
+      this.notify(trans('Could not save the pasted image: %s', message))
+      return undefined
     }
+  }
 
-    // If something went wrong or the user did not provide a directory, abort
-    if (!await this._app.fsal.isDir(target.targetDir)) {
-      showNativeNotification(trans('The requested directory was not found.'))
+  /**
+   * Checks what currently exists at the given path.
+   *
+   * @param   {string}  filePath  The path to check
+   *
+   * @return  {Promise<Buffer|'free'|'occupied'>}  "free" if nothing exists
+   *                                               there, the file contents if
+   *                                               it is a file, and "occupied"
+   *                                               if it is something else.
+   */
+  private async readExistingFile (filePath: string): Promise<Buffer|'free'|'occupied'> {
+    const stat = await fs.lstat(filePath).catch((err: any) => {
+      if (err?.code === 'ENOENT') {
+        return undefined
+      }
+      throw err
+    })
+
+    if (stat === undefined) {
+      return 'free'
+    } else if (!stat.isFile()) {
+      return 'occupied'
+    } else {
+      return await fs.readFile(filePath)
     }
+  }
 
-    // Build the correct path
-    let imagePath = path.join(target.targetDir, targetFile)
-
-    let size = image.getSize()
-    let resizeWidth = parseInt(target.width)
-    let resizeHeight = parseInt(target.height)
-    let shouldResizeWidth = resizeWidth > 0 && resizeWidth !== size.width
-    let shouldResizeHeight = resizeHeight > 0 && resizeHeight !== size.height
-
-    // A final step: It may be that the user wanted to resize the image (b/c
-    // it's too large or so). In this case, there are width and height
-    // properties provided in target.
-    if (shouldResizeWidth || shouldResizeHeight) {
-      // The resize function requires real integers
-      image = image.resize({ width: resizeWidth, height: resizeHeight })
+  /**
+   * Shows a notification to the user, falling back to the log if the platform
+   * does not support notifications.
+   *
+   * @param   {string}  message  The message to show
+   */
+  private notify (message: string): void {
+    if (!showNativeNotification(message)) {
+      this._app.log.warning(`[Application] ${message}`)
     }
-
-    this._app.log.info(`Saving image ${targetFile} to ${imagePath} ...`)
-
-    if (path.extname(imagePath).toLowerCase() === '.png') {
-      await fs.writeFile(imagePath, image.toPNG())
-    } else if (path.extname(imagePath).toLowerCase() === '.jpg') {
-      await fs.writeFile(imagePath, image.toJPEG(100))
-    }
-
-    return imagePath
   }
 }
