@@ -238,6 +238,13 @@ export default function getMenu (
           }
         },
         {
+          id: 'menu.export-html',
+          label: 'Export to HTML',
+          click: function (_menuItem, focusedWindow) {
+            (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'export-html')
+          }
+        },
+        {
           id: 'menu.preferences',
           label: trans('Preferences…'),
           submenu: [
@@ -702,6 +709,16 @@ export default function getMenu (
               })
               .catch(err => logger.error(err.message as string, err))
           }
+        },
+        {
+          type: 'separator'
+        },
+        // Marks this build as the personal fork so that it can be told apart
+        // from an official Zettlr installation at a glance.
+        {
+          id: 'menu.lyh_fork_marker',
+          label: 'LYH\'s Unofficial Build',
+          enabled: false
         }
       ]
     }
