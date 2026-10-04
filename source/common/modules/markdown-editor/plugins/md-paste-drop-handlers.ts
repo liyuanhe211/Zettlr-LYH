@@ -20,6 +20,7 @@ import { configField } from '../util/configuration'
 import { pathBasename, pathDirname, pathExtname, relativePath } from '@common/util/renderer-path-polyfill'
 import { type SaveImageFromClipboardAPI } from 'source/app/service-providers/commands/save-image-from-clipboard'
 import { hasMdOrCodeExt } from '@common/util/file-extention-checks'
+import { buildImageMarkdownLink, buildPastedImageRelativePath } from '@common/util/paste-image-path'
 import type { DocumentManagerIPCAPI } from 'source/app/service-providers/documents'
 
 const ipcRenderer = window.ipc
@@ -46,10 +47,13 @@ function normalizePathForInsertion (p: string, basePath: string): string {
 }
 
 /**
- * Handles the code required to save an image from the clipboard. It returns the
- * image tag with the image path as soon as the image has been saved to disk.
+ * Handles the code required to save an image from the clipboard. Main saves the
+ * image into the "_Images" folder next to the document without asking (or
+ * notifies the user why it could not, e.g. because the document has not been
+ * saved yet). It returns the relative image tag, e.g. `![](_Images/name.png)`,
+ * as soon as the image has been saved to disk.
  *
- * @param   {string}           basePath  The base path for the image
+ * @param   {string}           basePath  The directory of the document
  * @param   {File}             file      The image object
  *
  * @return  {Promise<string>}            Resolves with the image tag or undefined.
@@ -72,12 +76,12 @@ async function saveImageFromClipboard (basePath: string, file: File): Promise<st
     payload: { basePath, imageData, imageName: file.name } as SaveImageFromClipboardAPI
   })
 
-  // If the user aborts the pasting process, the command will return
-  // undefined, so we have to check for this.
+  // If the image could not be saved (main has already told the user why), the
+  // command returns undefined, so we have to check for this.
   if (pathToInsert !== undefined) {
-    const p = normalizePathForInsertion(pathToInsert, basePath)
-    const tag = `![${pathBasename(p)}](${p})`
-    return tag
+    // Main always saves into the "_Images" folder next to the document, so the
+    // relative path consists of that folder and the file name main has chosen.
+    return buildImageMarkdownLink(buildPastedImageRelativePath(pathBasename(pathToInsert)))
   }
 }
 
@@ -146,9 +150,9 @@ export const mdPasteDropHandlers: DOMEventHandlers<any> = {
         if (imageRE.test(file.name)) {
           const filePath = window.getPathForFile(file)
           if (filePath === undefined) {
-            // This image resides only within the clipboard, so prompt the user
-            // to save it down. The command will already wrap everything into
-            // `![]()`.
+            // This image resides only within the clipboard, so save it into
+            // the "_Images" folder next to the document and insert a relative
+            // `![](_Images/...)` tag.
             allPromises.push(new Promise((resolve, reject) => {
               saveImageFromClipboard(basePath, file)
                 .then(tag => {
@@ -221,7 +225,7 @@ export const mdPasteDropHandlers: DOMEventHandlers<any> = {
           // The image resides somewhere on disk -> directly insert
           insertions.push(`![${file.name}](${relativePath(cwd, filePath)})`)
         } else if (isImage && filePath === undefined) {
-          // It's an image --> offer to save
+          // It's an image without a file on disk --> save it into "_Images"
           allPromises.push(new Promise((resolve, reject) => {
             saveImageFromClipboard(cwd, file)
               .then(tag => {
