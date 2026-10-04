@@ -186,7 +186,18 @@ export const useDocumentTreeStore = defineStore('document-tree', () => {
   // Initial update for the pane structure ...
   if (windowId !== null) {
     ipcRenderer.invoke('documents-provider', { command: 'retrieve-tab-config', payload: { windowId } } as DocumentManagerIPCAPI)
-      .then((treedata: LeafNodeJSON|BranchNodeJSON) => recoverState(paneStructure, paneData, lastLeafId, treedata))
+      .then((treedata: LeafNodeJSON|BranchNodeJSON) => {
+        recoverState(paneStructure, paneData, lastLeafId, treedata)
+        // A restored window already has an active document. Without picking it
+        // up here, it would stay unknown until the user switches documents for
+        // the first time, and the file manager could neither highlight nor
+        // reveal the document the user is actually looking at.
+        const restoredLeaf = paneData.value.find(leaf => leaf.id === lastLeafId.value)
+        if (restoredLeaf?.activeFile != null) {
+          lastLeafActiveFile.value = restoredLeaf.activeFile
+          maybeUncollapseDirectories(restoredLeaf.activeFile.path)
+        }
+      })
       .catch(err => console.error(err))
   }
 
