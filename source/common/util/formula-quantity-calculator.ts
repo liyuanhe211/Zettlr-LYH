@@ -15,7 +15,9 @@
  *                  CodeMirror renderer and the Markdown-to-HTML converter.
  *
  *                  Supported unit atoms (whitelist): g, mg, mol, mmol, L, mL,
- *                  µL. Compound units are written with a slash directly
+ *                  µL; the liter atoms are also accepted in the lowercase
+ *                  spellings l, ml, µl (results always display the canonical
+ *                  mL). Compound units are written with a slash directly
  *                  between two atoms (g/mol, mmol/mL, g/mL, ...). Supported
  *                  operators: × and * (multiplication), ÷ and / (division),
  *                  + and − / - (addition/subtraction), and parentheses. The
@@ -36,14 +38,14 @@
 export type FormulaErrorType = 'syntax'|'unknown-unit'|'unknown-dimension'|'dimension-mismatch'
 
 /**
- * User-facing (Chinese) labels for the error categories. These strings were
- * specified verbatim by the user and must not be reworded.
+ * User-facing labels for the error categories. They are rendered into the
+ * editor and into exported documents.
  */
 export const FORMULA_ERROR_LABELS: Record<FormulaErrorType, string> = {
-  'syntax': '公式语法错误无法计算',
-  'unknown-unit': '物理量计算未定义单位错误',
-  'unknown-dimension': '未知物理量类型',
-  'dimension-mismatch': '量纲不一致无法相加减'
+  'syntax': 'Formula syntax error',
+  'unknown-unit': 'Undefined unit',
+  'unknown-dimension': 'Unknown quantity type',
+  'dimension-mismatch': 'Mismatched dimensions in addition/subtraction'
 }
 
 /**
@@ -79,10 +81,10 @@ export type FormulaOutcome =
  *                                     FORMULA_ERROR_LABELS)
  * @param   {string}  originalContent  The original text between the brackets
  *
- * @return  {string}                   E.g. `[[公式语法错误无法计算：1.0 mL × (2]]`
+ * @return  {string}                   E.g. `[[Formula syntax error: 1.0 mL × (2]]`
  */
 export function formatFormulaError (label: string, originalContent: string): string {
-  return `[[${label}：${originalContent}]]`
+  return `[[${label}: ${originalContent}]]`
 }
 
 /**
@@ -120,8 +122,9 @@ interface UnitDefinition {
 
 /**
  * The unit whitelist. Everything else is reported as an unknown unit when it
- * appears in a computation. NOTE: matching is case-sensitive (`ml` or `ML`
- * are NOT recognized).
+ * appears in a computation. NOTE: matching is case-sensitive (`ML` or `Mol`
+ * are NOT recognized), except that the liter units additionally accept the
+ * common lowercase spellings listed below; output always uses mL.
  */
 const UNIT_ATOMS: Record<string, UnitDefinition> = {
   'g': { factor: 1000, mass: 1, amount: 0, volume: 0 },
@@ -129,12 +132,17 @@ const UNIT_ATOMS: Record<string, UnitDefinition> = {
   'mol': { factor: 1000, mass: 0, amount: 1, volume: 0 },
   'mmol': { factor: 1, mass: 0, amount: 1, volume: 0 },
   'L': { factor: 1000, mass: 0, amount: 0, volume: 1 },
+  'l': { factor: 1000, mass: 0, amount: 0, volume: 1 },
   'mL': { factor: 1, mass: 0, amount: 0, volume: 1 },
+  'ml': { factor: 1, mass: 0, amount: 0, volume: 1 },
   // Micro liters: U+00B5 (micro sign), U+03BC (Greek mu), and the ASCII
-  // fallback spelling
+  // fallback spelling, each with both L casings
   'µL': { factor: 0.001, mass: 0, amount: 0, volume: 1 },
   'μL': { factor: 0.001, mass: 0, amount: 0, volume: 1 },
-  'uL': { factor: 0.001, mass: 0, amount: 0, volume: 1 }
+  'uL': { factor: 0.001, mass: 0, amount: 0, volume: 1 },
+  'µl': { factor: 0.001, mass: 0, amount: 0, volume: 1 },
+  'μl': { factor: 0.001, mass: 0, amount: 0, volume: 1 },
+  'ul': { factor: 0.001, mass: 0, amount: 0, volume: 1 }
 }
 
 /** Characters that may appear in anything we treat as a formula/quantity */
