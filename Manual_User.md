@@ -208,6 +208,8 @@ The Row submenu of the table context menu contains, after "Move row down" and a 
 
 Neither command has a keyboard shortcut.
 
+To copy a block of several cells instead of a whole row, drag across them and press Ctrl+C (see "Selecting text and cells by dragging"). The block is copied in the same two forms as "Copy row" and can be pasted back with "Paste row".
+
 Known limitations:
 
 - If a cell itself contains a tab or a line break, the copied plain text spills into the next cell or row.
@@ -229,16 +231,40 @@ A click that lands inside the cell but not on its text (for example, in the cell
 
 Right-clicking a cell that is not being edited opens the table context menu and places the cursor in the cell by the same rules.
 
+A press of the mouse button counts as a click as long as the mouse moves no more than 4 pixels before the button is released. Pressing the button and dragging further selects text in the cell or a block of cells instead; see "Selecting text and cells by dragging".
+
 There is no setting, keyboard shortcut, or message for this behavior.
 
 Known limitations:
 
-- Where the rendered text does not appear in the source, for example a citation shown as author and year or the result of a bracketed formula, the cursor position is only approximate.
-While you edit a table cell, Enter does not leave the cell. It inserts a line break, written as `<br>`, at the cursor. If text is selected, the `<br>` replaces it. Shift+Enter moves the cursor to the start of the cell in the same column of the row above.
-
+- Where the rendered text does not appear in the source (for example, a citation shown as author and year, or the result of a bracketed formula), the cursor position is only approximate.
 - In a cell that holds only images, the cursor goes to the end of the cell's source.
 
+### Selecting text and cells by dragging
+
+Inside a table, dragging with the left mouse button selects either text within one cell or a rectangular block of whole cells, depending on whether the mouse leaves the cell where you pressed the button.
+
+To select text in one cell, press the mouse button on the cell and drag without leaving it. The text from the press point to the mouse pointer is selected. If the cell was not being edited, it opens for editing the moment you press the button: it switches from rendered content to Markdown source, and the selection starts at the spot in the source that corresponds to the press location, by the rules described in "Clicking into a table cell". Because the source differs from the rendered text, the text may shift slightly at that moment; the end of the selection follows the mouse pointer over the source as shown from then on. In a cell that is already being edited, dragging inside the cell selects text just as in ordinary text.
+
+To select a block of cells, press the mouse button in one cell and drag into another. All cells in the rectangle between the starting cell and the cell under the mouse pointer are highlighted with a translucent green background, and no cell is being edited while the block is selected. When the mouse pointer goes past the edge of the table, the block extends to the nearest row and column at that edge. It makes no difference whether the starting cell was being edited. If you drag back into the starting cell before releasing the button, the block disappears and text in the starting cell is selected again. Column widths stay fixed during the drag, so cells do not move under the mouse pointer.
+
+While a block is selected, Ctrl+C (Cmd+C on macOS) copies it. The clipboard receives the cells in the same two forms as "Copy row" (see "Tables"): tab-separated plain text, with one line per row of the block and the Markdown source of each cell trimmed of surrounding spaces, and an HTML table. The block can therefore be pasted into Excel or Word, or back into a table with "Paste row". The block stays selected after copying.
+
+Pressing Ctrl, Shift, Alt, or Cmd on its own while a block is selected does nothing. Any other key only ends the block selection: the key itself has no effect and the document is not changed, and the cursor returns to the cell where the drag started, which opens for editing. Clicking anywhere, inside or outside the table, also ends the block selection.
+
+There is no setting or message for this behavior.
+
+Known limitations:
+
+- A selected block of cells can only be copied. It cannot be deleted, cut, or overwritten by pasting.
+- A block cannot be extended with Shift and a click, and it cannot be selected with the keyboard.
+- The copied cells contain their Markdown source as written, for example `**bold**` or `<br>`, not the formatted text.
+
+[Manual pending] A screenshot of a table with a block of cells highlighted by dragging is missing; producing it needs a running copy of the program, which this update could not start.
+
 ### Line breaks and arrow keys in table cells
+
+While you edit a table cell, Enter does not leave the cell. It inserts a line break, written as `<br>`, at the cursor. If text is selected, the `<br>` replaces it. Shift+Enter moves the cursor to the start of the cell in the same column of the row above.
 
 The cell being edited shows its Markdown source, and every `<br>` in it (also `<br/>` and `<br />`, in any letter case) ends a line. The text after each tag continues on a new line, so the source keeps the same lines the rendered cell shows. The tags themselves remain visible. After you press Enter, the cursor stands at the start of the new line.
 
@@ -765,7 +791,8 @@ Each message appears in the result text next to "Export to PPTX", preceded by th
 - The toolbar checkboxes "Open settings", "New file", "Previous file", "Next file", and the word/character counter have no effect.
 - The Files history keeps only the 200 most recently opened files.
 - Lines that contain only images are centered line by line in the editor but paragraph by paragraph in Export to HTML, and a space between an image and its attributes prevents centering.
-- "Paste row" never adds rows or columns, and cells that contain tabs or line breaks do not copy cleanly.
+- "Paste row" never adds rows or columns, and cells containing tabs or line breaks do not copy cleanly.
+- You can copy a block of table cells selected by dragging, but you cannot delete, cut, or overwrite them by pasting. You cannot extend the block with Shift and a click, you cannot select a block with the keyboard, and the block copies as Markdown source rather than formatted text.
 - Task checkboxes in table cells need each task line to start with `-` and the lines to be separated by plain `<br>` tags. If the task prefixes are wrapped in formatting or inline code, the checkboxes won't render.
 - Images in table cells do not display when their address is a Windows absolute path or a `file://` address.
 - After clicking into a rendered table cell, the cursor position is only approximate when the clicked text does not appear in the source, such as a citation or the result of a bracketed formula. In a cell that holds only images, the cursor goes to the end of the cell's source. Pasting several lines of text into a table cell joins them with spaces instead of `<br>` line breaks, and moving into another cell with Up or Down keeps the horizontal position only approximately. Image files pasted or dropped from disk are linked with backslashes and unencoded spaces on Windows.
