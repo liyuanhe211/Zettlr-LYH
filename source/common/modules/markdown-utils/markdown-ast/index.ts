@@ -627,7 +627,14 @@ export function parseNode (node: SyntaxNode, markdown: string): ASTNode {
     case 'Image':
     case 'Link': {
       const marks = node.getChildren('LinkMark')
-      const url = node.getChild('URL')
+      // The label can itself contain URLs, so the last URL child is the
+      // destination; a URL that still lies within the label (before the
+      // closing bracket) is no destination at all. Same rule as the image
+      // renderer's isRenderableImageNode().
+      let url = node.getChildren('URL').pop() ?? null
+      if (url !== null && marks.length >= 2 && url.from < marks[1].from) {
+        url = null
+      }
       const title = node.getChild('LinkTitle')
 
       if (url === null) {
