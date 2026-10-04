@@ -117,6 +117,20 @@ function escapeHTML (text: string): string {
 }
 
 /**
+ * Builds an HTML table containing the provided cell texts.
+ *
+ * @param   {string[][]}  rows  The cell texts, indexed by row and cell
+ *
+ * @return  {string}            The HTML string
+ */
+export function buildTableClipboardHTML (rows: string[][]): string {
+  const rowsHTML = rows.map(cellTexts => {
+    return '<tr>' + cellTexts.map(text => `<td>${escapeHTML(text)}</td>`).join('') + '</tr>'
+  }).join('')
+  return `<table><tbody>${rowsHTML}</tbody></table>`
+}
+
+/**
  * Builds an HTML table containing a single row with the provided cell texts.
  *
  * @param   {string[]}  cellTexts  The cell texts
@@ -124,8 +138,7 @@ function escapeHTML (text: string): string {
  * @return  {string}               The HTML string
  */
 export function buildRowClipboardHTML (cellTexts: string[]): string {
-  const cellsHTML = cellTexts.map(text => `<td>${escapeHTML(text)}</td>`).join('')
-  return `<table><tbody><tr>${cellsHTML}</tr></tbody></table>`
+  return buildTableClipboardHTML([cellTexts])
 }
 
 /**

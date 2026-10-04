@@ -16,6 +16,7 @@ import { type EditorState, StateField } from '@codemirror/state'
 import { subviewUpdatePlugin } from './subview'
 import { LOCKED_WIDTHS_ATTRIBUTE, TableWidget } from './widget'
 import { TABLE_WIDGET_WRAPPER_CLASS } from './widget-dom'
+import { CELL_RANGE_SELECTED_CLASS, cellRangeSelection } from './cell-range-selection'
 
 // TODO: Think of an appropriate place for this. Or do we want to keep this
 // confined to this plugin?
@@ -147,6 +148,10 @@ export const renderTables = [
             cursor: 'pointer'
           }
         },
+        // Cells within a range selected by dragging (see cell-range-selection.ts)
+        [`&.${CELL_RANGE_SELECTED_CLASS}`]: {
+          backgroundColor: 'rgba(28, 178, 126, 0.25)'
+        },
         // Grab handle styles
         '& .grab-handle': {
           position: 'absolute',
@@ -199,5 +204,6 @@ export const renderTables = [
       }
     }
   }),
-  subviewUpdatePlugin
+  subviewUpdatePlugin,
+  cellRangeSelection
 ]
