@@ -11,6 +11,7 @@
       <!-- The choice of working directory vs. temporary applies to all exporters -->
       <hr>
       <RadioControl
+        v-if="!isHTMLFormat"
         v-model="exportDirectory"
         v-bind:options="{
           'temp': tempDirLabel,
@@ -62,6 +63,7 @@ import { pathBasename } from '@common/util/renderer-path-polyfill'
 import { useConfigStore } from 'source/pinia'
 import { parseReaderWriter } from 'source/common/pandoc-util/parse-reader-writer'
 import type { CustomExportIPCAPI, ExportIPCAPI } from 'source/app/service-providers/commands/export'
+import { exportToHTMLAndShow } from './util/export-document-to-html'
 
 const ipcRenderer = window.ipc
 
@@ -171,12 +173,27 @@ watch(format, function (value) {
   configStore.setConfigValue('export.lastUsedProfile', profile)
 })
 
+// HTML is exported by this fork's own exporter, which reproduces the editor's
+// display in a single self-contained file next to the document.
+const HTML_WRITERS = [ 'html', 'html4', 'html5' ]
+const isHTMLFormat = computed(() => {
+  const profile = profileMetadata.value.find(e => e.name === format.value)
+  return profile !== undefined && HTML_WRITERS.includes(parseReaderWriter(profile.writer).name)
+})
+
 function doExport (): void {
   const customCommand = customCommands.value.find(x => x.command === format.value)
   const profile = profileMetadata.value.find(e => e.name === format.value)
   isExporting.value = true
 
-  if (customCommand !== undefined) {
+  if (customCommand === undefined && isHTMLFormat.value) {
+    exportToHTMLAndShow(props.filePath)
+      .finally(() => {
+        isExporting.value = false
+        emit('close')
+      })
+      .catch(e => console.error(e))
+  } else if (customCommand !== undefined) {
     // Run the custom command exporter
     ipcRenderer.invoke('application', {
       command: 'custom-export',
