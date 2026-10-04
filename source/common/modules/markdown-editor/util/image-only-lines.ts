@@ -31,7 +31,17 @@ export function isRenderableImageNode (state: EditorState, node: SyntaxNodeRef):
     return false
   }
 
-  if (node.node.getChild('URL') === null || node.node.getChildren('LinkMark').length < 2) {
+  // Since alt-text can potentially contain multiple URLs, the last one is
+  // taken as the image source.
+  const urlNode = node.node.getChildren('URL').pop()
+  const marks = node.node.getChildren('LinkMark')
+  if (urlNode === undefined || marks.length < 2) {
+    return false
+  }
+
+  // alt-text can contain URLs, so if the last URL node still lies within the
+  // alt-text, the image has no real source.
+  if (urlNode.from < marks[1].from) {
     return false
   }
 

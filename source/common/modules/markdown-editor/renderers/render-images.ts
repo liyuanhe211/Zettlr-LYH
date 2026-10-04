@@ -68,7 +68,7 @@ export function resolveImageUrl (filePath: string, imageUrl: string): string {
  *
  * @return  {string|undefined}        The normalized size if recognized, or undefined.
  */
-function normalizeSize (size?: string): string|undefined {
+function normalizeSize (size?: string): string | undefined {
   if (size === undefined || !/[\d\.]+(?:cm|mm|in|px|pt|pc|em|ex|ch|rem|vw|vh|vmin|vmax|%)/i.test(size)) {
     return undefined
   }
@@ -198,7 +198,7 @@ class ImageWidget extends WidgetType {
     caption.contentEditable = 'true'
 
     // Define a quick inline function that takes care of applying a new caption
-    const updateCaptionFunction = function (event: KeyboardEvent|FocusEvent): void {
+    const updateCaptionFunction = function (event: KeyboardEvent | FocusEvent): void {
       if (event instanceof KeyboardEvent && event.key !== 'Enter') {
         // If this is a KeyboardEvent, only perform the action on Enter
         return
@@ -313,7 +313,7 @@ function shouldHandleNode (node: SyntaxNodeRef): boolean {
   return node.type.name === 'Image'
 }
 
-function createWidget (state: EditorState, node: SyntaxNodeRef): ImageWidget|undefined {
+function createWidget (state: EditorState, node: SyntaxNodeRef): ImageWidget | undefined {
   if (!isRenderableImageNode(state, node)) {
     return undefined
   }
@@ -322,7 +322,10 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): ImageWidget|und
   // replacement widget
   const marks = node.node.getChildren('LinkMark')
   const titleNode = node.node.getChild('LinkTitle')
-  const urlNode = node.node.getChild('URL')!
+  // Since alt-text can potentially contain multiple URLs, the last one is the
+  // image source; isRenderableImageNode() guarantees it exists and sits
+  // outside the alt-text.
+  const urlNode = node.node.getChildren('URL').pop()!
 
   const alt = state.sliceDoc(marks[0].to, marks[1].from)
   const title = titleNode === null ? alt : state.sliceDoc(titleNode.from, titleNode.to)
