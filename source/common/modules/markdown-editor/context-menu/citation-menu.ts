@@ -19,6 +19,7 @@ import { trans } from 'source/common/i18n-renderer'
 import { CITEPROC_MAIN_DB } from 'source/types/common/citeproc'
 import { nodeToCiteItem } from '../parser/citation-parser'
 import type { SyntaxNode } from '@lezer/common'
+import { getPandocAttributeSection, type PandocAttributeRange } from './pandoc-attribute-menu'
 
 const ipcRenderer = window.ipc
 
@@ -30,7 +31,7 @@ const ipcRenderer = window.ipc
  * @param   {string[]}                  keys    The citation keys
  * @param   {string}                    label   An optional label
  */
-export function citationMenu (view: EditorView, coords: { x: number, y: number }, citationNode: SyntaxNode): void {
+export function citationMenu (view: EditorView, coords: { x: number, y: number }, citationNode: SyntaxNode, pandocRange?: PandocAttributeRange): void {
   // Calculate the relevant state
   const config = view.state.field(configField).metadata.library
   const callback = window.getCitationCallback(config === '' ? CITEPROC_MAIN_DB : config)
@@ -67,6 +68,11 @@ export function citationMenu (view: EditorView, coords: { x: number, y: number }
           .catch((err: unknown) => console.error(err))
       }
     })
+  }
+
+  // Pandoc attribute section (only in Pandoc mode)
+  if (pandocRange !== undefined) {
+    tpl.push(...getPandocAttributeSection(view, pandocRange, coords))
   }
 
   showPopupMenu(coords, tpl)

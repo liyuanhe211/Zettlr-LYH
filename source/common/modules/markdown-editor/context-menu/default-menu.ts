@@ -21,6 +21,7 @@ import { forEachDiagnostic, type Diagnostic, forceLinting, setDiagnostics } from
 import { applyBold, applyItalic, insertLink, applyBlockquote, applyOrderedList, applyBulletList, applyTaskList } from '../commands/markdown'
 import { cut, copyAsPlain, copyAsHTML, paste, pasteAsPlain } from '../util/copy-paste-cut'
 import { getTransformSubmenu } from './transform-items'
+import { getPandocAttributeSection, type PandocAttributeRange } from './pandoc-attribute-menu'
 import { extractLTSpellcheckSuggestionsFrom, isLanguageToolMisspelling } from '../linters/language-tool'
 
 const ipcRenderer = window.ipc
@@ -84,7 +85,7 @@ async function fetchSuggestions (term: string): Promise<string[]> {
  * @param   {SyntaxNode}                node    The node
  * @param   {{ x: number, y: number }}  coords  The screen coordinates
  */
-export async function defaultMenu (view: EditorView, node: SyntaxNode, coords: { x: number, y: number }): Promise<void> {
+export async function defaultMenu (view: EditorView, node: SyntaxNode, coords: { x: number, y: number }, pandocRange?: PandocAttributeRange): Promise<void> {
   // In this function, we're doing a lot of iffs to check if there is a
   // spellcheck underneath the cursor and, if there is, add suggestions (if
   // there are) to the context menu.
@@ -283,6 +284,11 @@ export async function defaultMenu (view: EditorView, node: SyntaxNode, coords: {
   // If we found a diagnostic earlier and a word, add the suggestion items
   if (diagnostic !== undefined && misspelledWord !== undefined) {
     tpl.unshift(...suggestionItems)
+  }
+
+  // Pandoc attribute section (only in Pandoc mode)
+  if (pandocRange !== undefined) {
+    tpl.push(...getPandocAttributeSection(view, pandocRange, coords))
   }
 
   showPopupMenu(coords, tpl)

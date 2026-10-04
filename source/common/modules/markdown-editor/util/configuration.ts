@@ -87,6 +87,11 @@ export interface EditorConfiguration {
   showMarkdownLineNumbers: boolean
   countChars: boolean
   shortcuts: CustomEditorShortcut[]
+  /**
+   * Pandoc mode: the context menus get a Pandoc attribute section. Set by the
+   * hosting component while the document's Pandoc PPTX preview is open.
+   */
+  pandocAttributeEditing: boolean
 }
 
 export function getDefaultConfig (): EditorConfiguration {
@@ -155,7 +160,8 @@ export function getDefaultConfig (): EditorConfiguration {
     highlightWhitespace: false,
     showMarkdownLineNumbers: false,
     countChars: false,
-    shortcuts: []
+    shortcuts: [],
+    pandocAttributeEditing: false
   }
 }
 

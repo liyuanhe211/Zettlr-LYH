@@ -24,6 +24,7 @@ import { pathDirname } from 'source/common/util/renderer-path-polyfill'
 import { configField } from '../util/configuration'
 import type { WindowControlsIPCAPI } from 'source/app/service-providers/windows'
 import { findReferenceForLinkLabel, removeMarkdownLink } from '../util/links'
+import { getPandocAttributeSection, type PandocAttributeRange } from './pandoc-attribute-menu'
 
 const ipcRenderer = window.ipc
 
@@ -78,7 +79,7 @@ function getURLForNode (node: SyntaxNode, state: EditorState): string|undefined 
  * @param   {SyntaxNode}                node    The node
  * @param   {{ x: number, y: number }}  coords  The coordinates
  */
-export function linkImageMenu (view: EditorView, node: SyntaxNode, coords: { x: number, y: number }): void {
+export function linkImageMenu (view: EditorView, node: SyntaxNode, coords: { x: number, y: number }, pandocRange?: PandocAttributeRange): void {
   const basePath = pathDirname(view.state.field(configField).metadata.path)
   const url = getURLForNode(node, view.state)
 
@@ -156,5 +157,8 @@ export function linkImageMenu (view: EditorView, node: SyntaxNode, coords: { x: 
     }
   ]
 
-  showPopupMenu(coords, isLink ? linkTpl : imgTpl)
+  // Pandoc attribute section (only in Pandoc mode)
+  const pandocSection = pandocRange !== undefined ? getPandocAttributeSection(view, pandocRange, coords) : []
+
+  showPopupMenu(coords, [ ...(isLink ? linkTpl : imgTpl), ...pandocSection ])
 }
