@@ -35,7 +35,7 @@ import {
   cursorMatchingBracket, cursorSyntaxLeft, cursorSyntaxRight, deleteLine,
   indentLess, indentMore, indentSelection, insertBlankLine, moveLineDown,
   moveLineUp, selectAll, selectLine, selectParentSyntax, selectSyntaxLeft,
-  selectSyntaxRight, simplifySelection, toggleBlockComment, toggleComment,
+  selectSyntaxRight, simplifySelection, toggleBlockComment,
   toggleTabFocusMode, redo, redoSelection, undo, undoSelection
 } from '@codemirror/commands'
 import { foldAll, foldCode, unfoldAll, unfoldCode } from '@codemirror/language'
@@ -64,6 +64,7 @@ import {
   applyHighlight,
   insertTabOrSpace
 } from '../commands/markdown'
+import { toggleCommentWithCursorInside } from '../commands/toggle-comment-cursor'
 import { pasteAsPlain, copyAsHTML } from '../util/copy-paste-cut'
 import { addColAfter, addColBefore, moveNextCell, movePrevCell, swapNextCol, swapPrevCol } from '../table-editor/commands/columns'
 import { alignTables, setAlignment } from '../table-editor/commands/tables'
@@ -301,7 +302,7 @@ export function mainEditorKeybindings (customShortcutMap: CustomEditorShortcut[]
 
     { key: 'Shift-Mod-\\', run: cursorMatchingBracket },
 
-    { key: sc('edit-toggle-comment'), run: toggleComment },
+    { key: sc('edit-toggle-comment'), run: toggleCommentWithCursorInside },
     { key: sc('edit-toggle-block-comment'), run: toggleBlockComment },
 
     { key: sc('misc-toggle-tab-focus'), run: toggleTabFocusMode },
