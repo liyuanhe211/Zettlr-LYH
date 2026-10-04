@@ -8,7 +8,68 @@
 
 <p align="center"><strong>Your one-stop publication workbench.</strong></p>
 
-<p align="center"><strong>Zettlr-LYH</strong> is a personal branch of Zettlr. Everything it adds or changes is described in the <a href="Manual_User.md">Zettlr-LYH User Manual</a>.</p>
+**Zettlr-LYH** is a personal fork of [Zettlr](https://github.com/Zettlr/Zettlr), the open-source Markdown editor. It keeps every Zettlr feature and adds the ones listed below, ordered from largest to smallest. Every link in the list points to the section of the [Zettlr-LYH User Manual](Manual_User.md) that gives full usage instructions and screenshots for that feature.
+
+- **[Pandoc PPTX slide preview and export.](Manual_User.md#pandoc-pptx-preview-and-export)** A live preview pane shows the active Markdown document as PowerPoint slides, rendered through a real PowerPoint instance with text-overflow measurement. Features include [synchronized scrolling between editor and slides](Manual_User.md#synchronized-scrolling-and-pins), a [panel for editing Pandoc attributes](Manual_User.md#editing-pandoc-attributes), [toolbar dialogs that insert fenced divs, bracketed spans, and two-column layouts](Manual_User.md#inserting-fenced-divs-spans-and-columns), [per-document template selection](Manual_User.md#choosing-a-template), and one-click [Export to PPTX](Manual_User.md#export-to-pptx). (Requires Windows with desktop PowerPoint; everything else works without it.)
+
+<p align="center">
+  <img src="Manual_Images/pptx-preview.png" alt="The editor split into the Markdown source of a slide document on the left and the live PPTX preview on the right, with overflow badges on the page cards" width="540"> <img src="Manual_Images/pandoc-attributes-panel.png" alt="The Pandoc Attributes panel with the sections Text Span, Table, Table Style, and Page" width="200">
+</p>
+
+- **[Calculation of bracketed physical-quantity formulas.](Manual_User.md#bracketed-physical-quantity-formulas)** Formulas written in double brackets are calculated and their results rendered in place, with [control over output units and precision](Manual_User.md#output-units-and-precision), and a command that [exports a copy of the document with the results written in](Manual_User.md#exporting-a-formula-calculated-copy).
+
+<p align="center">
+  <img src="Manual_Images/editor-formula-results.png" alt="Three formulas in the editor: a calculated result in green brackets, an error in red, and a formula shown as source because the cursor is inside it" width="640">
+</p>
+
+- **[An opening-history file tree.](Manual_User.md#the-opening-history-tree-in-the-files-section)** The Files section of the sidebar records every file you open and arranges the 200 most recent ones in their on-disk folder structure; per-folder eye buttons reveal the files you never opened.
+
+<p align="center">
+  <img src="Manual_Images/files-opening-history-tree.png" alt="The Files section of the sidebar showing the opening-history tree, with the current document highlighted and the eye button of one folder pressed" width="260">
+</p>
+
+- **Table editing improvements.** [Column widths stay fixed while you edit, and whole rows copy to and paste from Word and Excel](Manual_User.md#tables); [clicking a rendered cell puts the cursor at the clicked spot](Manual_User.md#clicking-into-a-table-cell); [Enter inserts a `<br>` line break, and arrow keys move within a cell before leaving it](Manual_User.md#line-breaks-and-arrow-keys-in-table-cells); [images](Manual_User.md#images-in-table-cells) and [task checkboxes](Manual_User.md#task-checkboxes-in-table-cells) render inside cells.
+
+- **[In-place rendering of HTML.](Manual_User.md#rendering-html-in-the-editor)** Raw HTML blocks and inline elements (spans, formatting tags, images, links, line breaks) appear rendered in the editor and switch to source when the cursor enters them.
+
+<p align="center">
+  <img src="Manual_Images/editor-html-block-rendered-and-source.png" alt="A raw HTML table in the editor, shown rendered while the cursor is outside the block and as colored source while the cursor is inside it" width="720">
+</p>
+
+- **[One-click export to HTML.](Manual_User.md#export-to-html)** A toolbar button and a tab-menu command export a Markdown file straight to a standalone HTML file, no dialog needed.
+
+<p align="center">
+  <img src="Manual_Images/export-html-editor-and-browser.png" alt="The same weekly report in the editor on the left and as an exported HTML file in a browser on the right" width="720">
+</p>
+
+- **[A JSON and JSON Lines viewer.](Manual_User.md#json-and-json-lines-files)** `.json` and `.jsonl` files open with a switch between a formatted read-only view (keys as headings) and an editable raw-text view.
+
+<p align="center">
+  <img src="Manual_Images/json-formatted-view.png" alt="A JSON file in the formatted view, with the view switch above the content and keys shown as headings" width="480">
+</p>
+
+- **[A cache of unsaved changes that survives restarts.](Manual_User.md#the-cache-of-unsaved-changes)** Unsaved edits are cached continuously and restored after a crash or restart; when a file [changes on disk](Manual_User.md#when-a-file-changes-on-disk) while it has unsaved edits, a dialog lets you choose which version to keep.
+
+<p align="center">
+  <img src="Manual_Images/dialog-unsaved-changes-found.png" alt="The Unsaved changes found dialog, with the choices Restore unsaved changes and Discard them and load the file from disk" width="340"> <img src="Manual_Images/dialog-file-modified-on-disk.png" alt="The File Modified on Disk dialog, comparing the version on disk with the editor contents and offering three choices" width="400">
+</p>
+
+- **[Opening files from Windows Explorer.](Manual_User.md#opening-files-from-windows-explorer)** A small launcher opens Markdown files in the running instance, or starts the program first.
+
+- **Many editing and display refinements.** [Justified text](Manual_User.md#justified-text), [centered image-only lines](Manual_User.md#lines-that-contain-only-images-are-centered), [rectangular (Alt+drag) selection](Manual_User.md#rectangular-selection), [always-visible inline-code backticks](Manual_User.md#inline-code), [a stable view while content loads](Manual_User.md#a-stable-view-while-you-work), [sideways scrolling of the tab bar with the mouse wheel](Manual_User.md#scrolling-the-tab-bar), [file names instead of titles in tabs](Manual_User.md#file-names-instead-of-titles), [improved image pasting](Manual_User.md#pasting-and-dropping-images), and more. See the [Editing](Manual_User.md#editing) chapter and the [toolbar reference](Manual_User.md#the-toolbar).
+
+<p align="center">
+  <img src="Manual_Images/editor-image-line-centered.png" alt="A bar chart on a line of its own, centered between two justified paragraphs" width="720">
+</p>
+
+<p align="center">
+  <img src="Manual_Images/toolbar.png" alt="The main-window toolbar of Zettlr-LYH with each group of buttons labelled" width="720">
+</p>
+
+Zettlr-LYH runs from source in development mode on Windows; the manual covers setup. Everything below this line is the original Zettlr README.
+
+***
+
 <p align="center">
   <a href="https://doi.org/10.5281/zenodo.2580173">
     <img src="https://zenodo.org/badge/DOI/10.5281/zenodo.2580173.svg" alt="DOI">
