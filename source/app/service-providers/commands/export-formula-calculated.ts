@@ -26,7 +26,7 @@ import type { AppServiceContainer } from 'source/app/app-service-container'
 /**
  * Formats the current local time as yyyymmdd_hhmmss for the export file name.
  */
-function formatTimestamp (now: Date): string {
+export function formatTimestamp (now: Date): string {
   const pad = (value: number): string => String(value).padStart(2, '0')
   const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
   const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`

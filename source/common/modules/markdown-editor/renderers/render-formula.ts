@@ -15,7 +15,7 @@
  *                  Clicking the result places the cursor inside the span so
  *                  the original formula becomes visible again. Erroneous
  *                  formulas are displayed bold red as
- *                  `[[<error label>：<original formula>]]`. Bracket contents
+ *                  `[[<error label>: <original formula>]]`. Bracket contents
  *                  that do not look like a formula (regular wiki links) are
  *                  left to the other extensions.
  *

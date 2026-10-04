@@ -13,7 +13,7 @@
  *                  spans, so any other Markdown viewer (which knows nothing
  *                  about the formula syntax) shows the same result as this
  *                  editor's preview: computed values as green bold 【…】,
- *                  errors as red bold [[<label>：<formula>]], single
+ *                  errors as red bold [[<label>: <formula>]], single
  *                  quantities verbatim. Formulas containing the measured-value
  *                  symbol m, regular wiki links, and anything inside code
  *                  blocks are left untouched.
