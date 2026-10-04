@@ -124,6 +124,7 @@
   <PopoverPandoc
     v-if="showPandocPopover && pandocButton !== null"
     v-bind:target="pandocButton"
+    v-bind:pandoc-type="pandocPopoverType"
     v-on:close="showPandocPopover = false"
     v-on:insert-pandoc="insertPandoc($event)"
   ></PopoverPandoc>
@@ -159,7 +160,6 @@ import PopoverTable from './PopoverTable.vue'
 import PopoverDocInfo from './PopoverDocInfo.vue'
 import PopoverPandoc from './PopoverPandoc.vue'
 import { trans } from '@common/i18n-renderer'
-import localiseNumber from '@common/util/localise-number'
 import generateId from '@common/util/generate-id'
 import {
   nextTick,
@@ -179,12 +179,16 @@ import { buildPipeMarkdownTable } from '@common/util/build-pipe-markdown-table'
 import { type UpdateState } from '@providers/updates'
 import { type ToolbarControl } from '@common/vue/window/WindowToolbar.vue'
 import getDocumentTitle from './util/get-document-title'
+import { hasMarkdownExt } from '@common/util/file-extention-checks'
+import { exportToHTMLAndShow } from './util/export-document-to-html'
+import { exportDocumentToPptx, pptxExportMessage, pptxExportRunning } from './util/export-document-to-pptx'
 import { useConfigStore, useDocumentTreeStore, useLRTStore, useWindowStateStore } from 'source/pinia'
 import type { ConfigOptions } from 'source/app/service-providers/config/get-config-template'
 import { type AnyDescriptor } from 'source/types/common/fsal'
 import type { DocumentManagerIPCAPI } from 'source/app/service-providers/documents'
 import { TaskStatus } from 'source/pinia/lrt-store'
 import PopoverLRT from './PopoverLRT.vue'
+import { pptxSyncScrollEnabled } from '@common/util/pptx-preview-link'
 
 const ipcRenderer = window.ipc
 
@@ -242,6 +246,8 @@ const showPomodoroPopover = ref<boolean>(false)
 const tasksButton = ref<HTMLElement|null>(null)
 const showTasksPopover = ref(false)
 const pandocButton = ref<HTMLElement|null>(null)
+// Which of the two Pandoc inserts the popover is currently configuring
+const pandocPopoverType = ref<'div'|'span'>('div')
 const showPandocPopover = ref<boolean>(false)
 
 export interface PomodoroConfig {
@@ -337,6 +343,12 @@ const sidebarsBeforeDistractionfree = ref<{ fileManager: boolean, sidebar: boole
 
 const sidebarVisible = computed<boolean>(() => configStore.config.window.sidebarVisible)
 const activeFile = computed(() => documentTreeStore.lastLeafActiveFile)
+// Whether the currently active document has its pandoc PPTX preview open
+// (drives the on/off coloring of the toolbar's Pandoc PPTX text button)
+const activeFileHasPptxPreview = computed<boolean>(() => {
+  const filePath = activeFile.value?.path
+  return filePath !== undefined && windowStateStore.pptxPreviewPaths.has(filePath)
+})
 const shouldCountChars = computed<boolean>(() => configStore.config.editor.countChars)
 const windowTitle = computed<string>(() => {
   if (activeFile.value === undefined) {
@@ -390,40 +402,6 @@ const shouldShowMenubar = computed<boolean>(() => process.platform === 'win32' |
 // Hide Toolbar is True and DistractionFree is True
 const shouldShowToolbar = computed<boolean>(() => !distractionFree.value || !configStore.config.display.hideToolbarInDistractionFree)
 
-const parsedDocumentInfo = computed<string[]>(() => {
-  const info = windowStateStore.activeDocumentInfo
-  if (info == null) {
-    return []
-  }
-
-  const lines: string[] = []
-
-  if (info.selections.length > 0) {
-    // We have selections to display.
-    let length = 0
-    info.selections.forEach(sel => {
-      length += shouldCountChars.value ? sel.chars : sel.words
-    })
-
-    lines.push(trans('%s selected', localiseNumber(length)))
-    if (info.selections.length === 1) {
-      const { head, anchor } = info.selections[0]
-      lines.push(`${anchor.line}:${anchor.ch} – ${head.line}:${head.ch}`)
-    } else {
-      // Multiple selections --> indicate
-      lines.push(trans('%s selections', info.selections.length))
-    }
-  } else {
-    // No selection.
-    lines.push(shouldCountChars.value
-      ? trans('%s characters', localiseNumber(info.chars))
-      : trans('%s words', localiseNumber(info.words)))
-    lines.push(`${info.cursor.line}:${info.cursor.ch}`)
-  }
-
-  return lines
-})
-
 // Long-Running-Task setup
 const hasTasks = computed(() => LRTStore.tasks.length > 0)
 const taskSuccess = computed(() => LRTStore.tasks.filter(t => t.status === TaskStatus.finished).length)
@@ -455,70 +433,20 @@ const toolbarControls = computed<ToolbarControl[]>(() => {
       icon: 'folder-open'
     },
     {
-      type: 'button',
-      id: 'show-stats',
-      title: trans('View writing statistics'),
-      icon: 'line-chart'
-    },
-    {
-      type: 'button',
-      id: 'show-tag-cloud',
-      title: trans('View Tag Cloud'),
-      icon: 'tag',
-      badge: undefined // this.hasTagSuggestions
-    },
-    {
-      type: 'button',
-      id: 'open-preferences',
-      title: trans('Open settings'),
-      icon: 'cog',
-      visible: getToolbarButtonDisplay('showOpenPreferencesButton')
-    },
-    {
-      type: 'button',
-      id: 'new-file',
-      title: trans('New file…'),
-      icon: 'plus',
-      visible: getToolbarButtonDisplay('showNewFileButton')
-    },
-    {
-      type: 'button',
-      id: 'previous-file',
-      title: trans('Previous file'),
-      icon: 'arrow',
-      direction: 'left',
-      visible: getToolbarButtonDisplay('showPreviousFileButton')
-    },
-    {
-      type: 'button',
-      id: 'next-file',
-      title: trans('Next file'),
-      icon: 'arrow',
-      direction: 'right',
-      visible: getToolbarButtonDisplay('showNextFileButton')
-    },
-    {
       type: 'spacer',
-      size: '3x'
+      size: '1x'
     },
     {
       type: 'button',
       class: 'share',
       id: 'export',
-      title: trans('Export current file'),
+      title: 'Export to HTML',
       icon: 'export'
     },
     {
       type: 'spacer',
       id: 'spacer-two',
       size: '1x'
-    },
-    {
-      type: 'button',
-      id: 'pandocDivOrSpan',
-      title: trans('Insert Pandoc Div or Span'),
-      icon: 'drag-handle',
-      visible: getToolbarButtonDisplay('showPandocDivSpanButton')
     },
     {
       type: 'button',
@@ -567,17 +495,6 @@ const toolbarControls = computed<ToolbarControl[]>(() => {
       size: '3x'
     },
     {
-      type: 'text',
-      align: 'center',
-      id: 'document-info',
-      content: parsedDocumentInfo.value,
-      visible: getToolbarButtonDisplay('showDocumentInfoText')
-    },
-    {
-      type: 'spacer',
-      size: '1x'
-    },
-    {
       type: 'ring',
       id: 'pomodoro',
       title: trans('Pomodoro timer'),
@@ -604,13 +521,82 @@ const toolbarControls = computed<ToolbarControl[]>(() => {
       initialState: sidebarVisible.value
     },
     {
+      // Sets the Pandoc group apart from the window's own switches on its left
+      type: 'spacer',
+      id: 'spacer-before-pandoc',
+      size: '3x'
+    },
+    {
       type: 'button',
-      id: 'open-updater',
-      title: trans('Update available'),
-      showLabel: true,
-      buttonText: trans('Update available'),
-      icon: 'download',
-      visible: isUpdateAvailable.value
+      id: 'toggle-pptx-preview',
+      title: 'Toggle the PPTX preview of the current Markdown document',
+      buttonText: 'MD → PPTX',
+      icon: '',
+      pressed: activeFileHasPptxPreview.value,
+      class: activeFileHasPptxPreview.value ? 'toolbar-text-button pptx-preview-button active' : 'toolbar-text-button pptx-preview-button'
+    },
+    {
+      type: 'button',
+      id: 'insertPandocDiv',
+      title: 'Wrap the selection in a Pandoc fenced div with an identifier, classes and attributes',
+      buttonText: 'Insert Div',
+      icon: '',
+      class: 'toolbar-text-button pandoc-insert-button',
+      visible: getToolbarButtonDisplay('showPandocDivSpanButton')
+    },
+    {
+      type: 'button',
+      id: 'insertPandocSpan',
+      title: 'Wrap the selection in a Pandoc bracketed span with an identifier, classes and attributes',
+      buttonText: 'Insert Span',
+      icon: '',
+      class: 'toolbar-text-button pandoc-insert-button',
+      visible: getToolbarButtonDisplay('showPandocDivSpanButton')
+    },
+    {
+      type: 'button',
+      id: 'markdownPandocColumns',
+      title: 'Split the selection into a two-column fenced div for slides (text on the left, image lines on the right)',
+      buttonText: 'Insert Two Columns',
+      icon: '',
+      class: 'toolbar-text-button pandoc-columns-button'
+    },
+    {
+      type: 'button',
+      id: 'pandocAttributes',
+      title: 'Toggle the panel that edits the Pandoc attributes of the text, image, table, block and page at the cursor',
+      buttonText: 'Attributes',
+      icon: '',
+      pressed: windowStateStore.pandocAttributesPanelOpen,
+      class: windowStateStore.pandocAttributesPanelOpen ? 'toolbar-text-button pandoc-columns-button active' : 'toolbar-text-button pandoc-columns-button'
+    },
+    {
+      type: 'button',
+      id: 'toggle-pptx-sync-scroll',
+      title: 'Scroll the Markdown editor and its PPTX preview together',
+      buttonText: 'Sync Scroll',
+      icon: '',
+      pressed: pptxSyncScrollEnabled.value,
+      class: pptxSyncScrollEnabled.value ? 'toolbar-text-button pptx-sync-scroll-button active' : 'toolbar-text-button pptx-sync-scroll-button'
+    },
+    {
+      type: 'button',
+      id: 'export-pandoc',
+      title: pptxExportMessage.value !== ''
+        ? pptxExportMessage.value
+        : 'Save the document, then convert it with the conversion script into a PPTX next to it',
+      buttonText: pptxExportRunning.value ? 'Exporting…' : 'Export to PPTX',
+      icon: '',
+      class: 'toolbar-text-button pandoc-export-button'
+    },
+    {
+      // The outcome of the last export; the button's tooltip carries the full
+      // text, which is longer than the toolbar can show.
+      type: 'text',
+      id: 'pandoc-export-status',
+      align: 'left',
+      content: pptxExportMessage.value,
+      visible: pptxExportMessage.value !== ''
     }
   ] satisfies ToolbarControl[]
 })
@@ -683,7 +669,6 @@ onMounted(() => {
   docInfoButton.value = document.querySelector('#toolbar-document-info')
   pomodoroButton.value = document.querySelector('#toolbar-pomodoro')
   tasksButton.value = document.querySelector('#toolbar-long-running-tasks')
-  pandocButton.value = document.querySelector('#toolbar-pandocDivOrSpan')
 
   ipcRenderer.on('shortcut', (event, shortcut) => {
     if (shortcut === 'toggle-sidebar') {
@@ -729,6 +714,10 @@ onMounted(() => {
       if (activeFile.value !== undefined) {
         ipcRenderer.invoke('application', { command: 'print', payload: activeFile.value.path })
           .catch(err => console.error(err))
+      }
+    } else if (shortcut === 'export-html') {
+      if (activeFile.value !== undefined && hasMarkdownExt(activeFile.value.path)) {
+        exportToHTMLAndShow(activeFile.value.path).catch(err => console.error(err))
       }
     } else if (shortcut === 'navigate-back') {
       ipcRenderer.invoke('documents-provider', {
@@ -913,7 +902,20 @@ function handleClick (clickedID?: string): void {
       }
     } as DocumentManagerIPCAPI).catch(err => console.error(err))
   } else if (clickedID === 'export') {
-    showExportPopover.value = !showExportPopover.value
+    if (activeFile.value !== undefined && hasMarkdownExt(activeFile.value.path)) {
+      exportToHTMLAndShow(activeFile.value.path).catch(err => console.error(err))
+    } else {
+      showExportPopover.value = !showExportPopover.value
+    }
+  } else if (clickedID === 'toggle-pptx-preview') {
+    // Only Markdown files can be previewed; ignore the click otherwise
+    const filePath = activeFile.value?.path
+    if (filePath !== undefined && hasMarkdownExt(filePath)) {
+      windowStateStore.togglePptxPreview(filePath)
+    }
+  } else if (clickedID === 'toggle-pptx-sync-scroll') {
+    // Read by every PPTX preview pane of this window (see pptx-preview-link)
+    pptxSyncScrollEnabled.value = !pptxSyncScrollEnabled.value
   } else if (clickedID === 'show-stats') {
     // The user wants to display the stats
     showStatsPopover.value = !showStatsPopover.value
@@ -933,8 +935,18 @@ function handleClick (clickedID?: string): void {
     showTasksPopover.value = !showTasksPopover.value
   } else if (clickedID === 'document-info') {
     showDocInfoPopover.value = !showDocInfoPopover.value
-  } else if (clickedID === 'pandocDivOrSpan') {
+  } else if (clickedID === 'insertPandocDiv' || clickedID === 'insertPandocSpan') {
+    pandocPopoverType.value = clickedID === 'insertPandocDiv' ? 'div' : 'span'
+    pandocButton.value = document.querySelector(`#toolbar-${clickedID}`)
     showPandocPopover.value = !showPandocPopover.value
+  } else if (clickedID === 'pandocAttributes') {
+    // Checkable button: toggles the persistent attribute panel (R22), which
+    // the last focused Markdown editor renders while the state is on
+    windowStateStore.pandocAttributesPanelOpen = !windowStateStore.pandocAttributesPanelOpen
+  } else if (clickedID === 'export-pandoc') {
+    if (activeFile.value !== undefined && hasMarkdownExt(activeFile.value.path)) {
+      exportDocumentToPptx(activeFile.value.path).catch(err => console.error(err))
+    }
   } else if (clickedID !== undefined && clickedID.startsWith('markdown') && clickedID.length > 8) {
     // The user clicked a command button, so we just have to run that.
     editorCommands.value.data = clickedID
@@ -1063,4 +1075,97 @@ function getToolbarButtonDisplay (configName: keyof ConfigOptions['displayToolba
 </script>
 
 <style lang="css" scoped>
+</style>
+
+<style lang="less">
+// The pandoc PPTX preview toggle is a checkable text push button following the
+// flat light design language of the PyQt6_GUI_Design_Rules skill: neutral fill
+// with a 1 px border and bold label while off, hover signalled by the
+// accent-blue border, pressed one shade darker, and checked (= the active
+// document's preview is open) held down in running green. The #toolbar
+// ancestor is part of the selector because the toolbar's own
+// "#toolbar button" rules outrank a lone id selector. The Sync Scroll switch
+// (editor and preview scroll together) is the same kind of checkable button.
+#toolbar #toolbar-toggle-pptx-preview,
+#toolbar #toolbar-toggle-pptx-sync-scroll {
+  background-color: #eceef2;
+  color: #374151;
+  border: 1px solid #c0c4cc;
+  border-radius: 0;
+  padding: 2px 10px;
+  font-weight: bold;
+
+  &:hover {
+    border-color: #3b78d1;
+    color: #111827;
+  }
+
+  &:active {
+    background-color: #dcdfe5;
+  }
+
+  &.active {
+    background-color: #3e8a72;
+    color: #ffffff;
+    border-color: #2f6b57;
+
+    &:hover {
+      background-color: #4c9d84;
+    }
+
+    &:active {
+      background-color: #2f6b57;
+    }
+  }
+}
+
+// The three inserts, Attributes and the export are momentary action buttons:
+// light action-blue fill with dark blue text per the design language,
+// accent-blue hover border, one shade darker when pressed.
+#toolbar #toolbar-insertPandocDiv,
+#toolbar #toolbar-insertPandocSpan,
+#toolbar #toolbar-markdownPandocColumns,
+#toolbar #toolbar-pandocAttributes,
+#toolbar #toolbar-export-pandoc {
+  background-color: #d6e8fa;
+  color: #1a3d6b;
+  border: 1px solid #b8d2ec;
+  border-radius: 0;
+  padding: 2px 10px;
+  font-weight: bold;
+
+  &:hover {
+    border-color: #3b78d1;
+    background-color: #e6f2ff;
+  }
+
+  &:active {
+    background-color: #b8d2ec;
+  }
+}
+
+// Attributes is checkable (its panel stays open, R22): while checked it is
+// held down in the same running green as the other checked Pandoc switches.
+#toolbar #toolbar-pandocAttributes.active {
+  background-color: #3e8a72;
+  color: #ffffff;
+  border-color: #2f6b57;
+
+  &:hover {
+    background-color: #4c9d84;
+  }
+
+  &:active {
+    background-color: #2f6b57;
+  }
+}
+
+// The export reports its outcome to the right of its button. A long summary
+// must not push the rest of the toolbar out of view, so the line is cut off
+// with an ellipsis; the button's tooltip carries the full text.
+#toolbar #toolbar-pandoc-export-status {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 </style>

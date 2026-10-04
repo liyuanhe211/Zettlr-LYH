@@ -13,6 +13,15 @@
     <div v-bind:id="`cm-text-${props.leafId}`">
       <!-- This element will be replaced with Codemirror's wrapper element on mount -->
     </div>
+    <!-- Persistent Pandoc attribute panel (R21/R22); teleported to the body element -->
+    <PopoverPandocAttributes
+      v-if="showsPandocPanel && pandocPanel !== null && pandocPanelAnchor !== null"
+      v-bind:anchor="pandocPanelAnchor"
+      v-bind:targets="pandocPanel.targets"
+      v-bind:focus-kind="pandocPanel.focusKind"
+      v-on:close="windowStateStore.pandocAttributesPanelOpen = false"
+      v-on:apply="applyPandocAttributes($event.updates, $event.refocusEditor)"
+    ></PopoverPandocAttributes>
   </div>
 </template>
 
@@ -53,6 +62,13 @@ import type { ProjectInfo } from 'source/common/modules/markdown-editor/plugins/
 import type { FileContentSearchResult } from 'source/app/service-providers/search'
 import type { CustomEditorShortcut } from 'source/common/modules/markdown-editor/keymaps/shortcuts'
 import getDocumentTitle from './util/get-document-title'
+import PopoverPandocAttributes from './PopoverPandocAttributes.vue'
+import type { PandocAttributeTarget, PandocAttributeTargetKind } from '@common/pandoc-util/pandoc-attribute-schema'
+import {
+  PANDOC_ATTRIBUTES_EVENT,
+  type PandocAttributeKindUpdate,
+  type PandocAttributesEventDetail
+} from '@common/modules/markdown-editor/context-menu/pandoc-attribute-menu'
 
 const ipcRenderer = window.ipc
 
@@ -180,9 +196,14 @@ ipcRenderer.on('links', _e => {
 // MOUNTED HOOK
 onMounted(() => {
   loadDocument().catch(err => console.error(err))
+  // "Edit All…" in the Pandoc section of the editor's context menus
+  mainEditorWrapper.value?.addEventListener(PANDOC_ATTRIBUTES_EVENT, onPandocAttributesRequest)
 })
 
 onBeforeUnmount(() => {
+  mainEditorWrapper.value?.removeEventListener(PANDOC_ATTRIBUTES_EVENT, onPandocAttributesRequest)
+  clearTimeout(pandocPanelRefreshTimeout)
+  pandocPanel.value = null
   if (currentEditor !== null) {
     props.persistentStateMap.set(props.file.path, currentEditor.persistentState)
     // Clear out the table of contents before unmounting the component.
@@ -293,7 +314,9 @@ const editorConfiguration = computed<EditorConfigOptions>(() => {
     countChars: editor.countChars,
     shortcuts: Object.entries(shortcuts.editor)
       .map(([ name, shortcut ]) => ({ name, shortcut }))
-      .filter((shortcut): shortcut is CustomEditorShortcut => shortcut.shortcut !== undefined)
+      .filter((shortcut): shortcut is CustomEditorShortcut => shortcut.shortcut !== undefined),
+    // Pandoc mode (R21): this document's Pandoc PPTX preview is open
+    pandocAttributeEditing: windowStateStore.pptxPreviewPaths.has(props.file.path)
   } satisfies EditorConfigOptions
 })
 
@@ -428,6 +451,114 @@ watch(toRef(props.editorCommands, 'insertPandoc'), () => {
   }
 })
 
+// BEGIN: PANDOC ATTRIBUTES (R21/R22)
+interface PandocPanelState {
+  from: number
+  to: number
+  targets: PandocAttributeTarget[]
+  /** Set by a context menu's Edit All…; cursor-driven refreshes clear it */
+  focusKind?: PandocAttributeTargetKind
+}
+
+const pandocPanel = ref<PandocPanelState|null>(null)
+const pandocPanelAnchor = ref<HTMLElement|null>(null)
+let pandocPanelRefreshTimeout: ReturnType<typeof setTimeout>|undefined
+
+// The persistent panel is a window-wide singleton (the toolbar's checkable
+// Attributes button toggles it); the last focused editor of the active
+// Markdown file renders it.
+const showsPandocPanel = computed<boolean>(() => {
+  return windowStateStore.pandocAttributesPanelOpen &&
+    props.activeFile?.path === props.file.path &&
+    // This editor, even though it may be focused, was not the last focused
+    // See https://github.com/Zettlr/Zettlr/issues/4361
+    documentTreeStore.lastLeafId === props.leafId &&
+    isMarkdown.value
+})
+
+/**
+ * (Re)reads the objects around the given range (default: the main selection)
+ * into the panel state.
+ *
+ * @param   {number|undefined}          from       Range start
+ * @param   {number|undefined}          to         Range end
+ * @param   {PandocAttributeTargetKind} focusKind  Section to scroll to
+ */
+function refreshPandocPanel (from?: number, to?: number, focusKind?: PandocAttributeTargetKind): void {
+  if (currentEditor === null) {
+    return
+  }
+  const found = currentEditor.getPandocAttributeTargets(from, to)
+  pandocPanel.value = { from: found.from, to: found.to, targets: found.targets, focusKind }
+}
+
+/**
+ * Follows the cursor while the panel is open: re-reads the objects around the
+ * selection, debounced so that typing does not query on every keystroke.
+ */
+function schedulePandocPanelRefresh (): void {
+  if (!showsPandocPanel.value) {
+    return
+  }
+  clearTimeout(pandocPanelRefreshTimeout)
+  pandocPanelRefreshTimeout = setTimeout(() => {
+    if (showsPandocPanel.value) {
+      refreshPandocPanel()
+    }
+  }, 200)
+}
+
+watch(showsPandocPanel, (visible) => {
+  if (visible) {
+    pandocPanelAnchor.value = document.querySelector<HTMLElement>('#toolbar-pandocAttributes')
+    // An Edit All… request may have populated the state right before this
+    // watcher ran; keep its range and focus in that case
+    if (pandocPanel.value === null) {
+      refreshPandocPanel()
+    }
+  } else {
+    clearTimeout(pandocPanelRefreshTimeout)
+    pandocPanel.value = null
+  }
+// The panel may already be open when this editor mounts (e.g. after switching
+// tabs); immediate makes the watcher run once right away. The refresh then
+// no-ops until loadDocument() has created the editor and refreshes again.
+}, { immediate: true })
+
+/**
+ * Writes attribute updates back into the document. Called per control change
+ * (the panel applies instantly, R22).
+ *
+ * @param   {PandocAttributeKindUpdate[]}  updates        At most one update per kind
+ * @param   {boolean}                      refocusEditor  Hand focus back to the editor
+ */
+function applyPandocAttributes (updates: PandocAttributeKindUpdate[], refocusEditor: boolean): void {
+  const state = pandocPanel.value
+  if (state === null || currentEditor === null) {
+    return
+  }
+  currentEditor.applyPandocAttributeUpdates(state.from, state.to, updates)
+  if (refocusEditor) {
+    currentEditor.focus()
+  }
+  // The write moved positions around; re-read the objects right away so that
+  // the panel shows the written values and holds valid ranges
+  refreshPandocPanel()
+}
+
+/**
+ * Handles "Edit All…" from the context menus: opens the panel for the range
+ * the menu was opened on and scrolls to the requested section.
+ *
+ * @param   {Event}  event  The PANDOC_ATTRIBUTES_EVENT
+ */
+function onPandocAttributesRequest (event: Event): void {
+  const detail = (event as CustomEvent<PandocAttributesEventDetail>).detail
+  refreshPandocPanel(detail.from, detail.to, detail.focusKind)
+  windowStateStore.pandocAttributesPanelOpen = true
+}
+// END: PANDOC ATTRIBUTES
+
 const fsalFiles = computed<MDFileDescriptor[]>(() => {
   return [...workspaceStore.descriptorMap.values()].filter(d => d.type === 'file')
 })
@@ -524,6 +655,13 @@ async function getEditorFor (doc: string): Promise<MarkdownEditor> {
     emit('globalSearch', tag)
   })
 
+  // The persistent Pandoc attribute panel (R22) follows the cursor
+  editor.on('cursorActivity', () => {
+    if (currentEditor === editor) {
+      schedulePandocPanelRefresh()
+    }
+  })
+
   // Supply the configuration object once initially
   editor.setOptions(editorConfiguration.value)
   return editor
@@ -540,6 +678,12 @@ async function loadDocument (): Promise<void> {
 
   currentEditor.setCompletionDatabase('tags', tags.value)
   currentEditor.setCompletionDatabase('snippets', snippets.value)
+
+  // The attribute panel may have been open while this editor was still
+  // loading (see the immediate watcher above); read the objects now
+  if (showsPandocPanel.value && pandocPanel.value === null) {
+    refreshPandocPanel()
+  }
 
   maybeHighlightSearchResults()
 
@@ -705,6 +849,9 @@ function maybeHighlightSearchResults (): void {
     .cm-scroller { padding: 50px 50px; }
     .cm-content { min-width: 0; }
   }
+
+  // Markdown text is justified; code files keep their ragged right edge.
+  &:not(.code-file) .cm-content .cm-line { text-align: justify; }
 
   // If a code file is loaded, we need to display the editor contents in monospace.
   &.code-file .cm-editor {
