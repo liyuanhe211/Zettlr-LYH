@@ -56,3 +56,71 @@ eslint_report.htm
 
 ### Idea ###
 .idea/*
+
+# Claude exploratory scripts
+_Claude_tmp/
+
+# User-provided screenshots (may contain personal desktop information)
+User_Provided_Screenshots/
+
+# ==== 标准条目补齐（Initialize_Project_Gitignore.py 标准模板）====
+
+# 敏感 / 私有文件双保险排除（大小写不敏感、任意位置）
+*[Ss][Ee][Cc][Rr][Ee][Tt]*
+*[Pp][Rr][Ii][Vv][Aa][Tt][Ee]*
+
+# 宽泛排除：临时 / 废弃 / 待办（任意大小写、任意位置；个别误伤的文件用 git add -f 强制加入）
+*[Oo][Bb][Ss][Oo][Ll][Ee][Tt][Ee]*
+*[Tt][Oo][Dd][Oo]*
+
+# 本机 Claude 协作文档与项目设置
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+dist/
+
+# 检查与测试缓存
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# 环境变量文件（防 API key 等入库；.env.example 是不含密钥的示例，保留）
+.env
+.env.*
+!.env.example
+
+# 日志
+*.log
+logs/
+
+# Office 锁文件与各类备份 / 临时后缀
+~$*
+*.bak
+*.tmp
+*.swp
+*~
+
+# 系统文件
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+ehthumbs.db
+
+# 宽泛排除：临时 / 废弃 / 待办（任意大小写、任意位置；个别误伤的文件用 git add -f 强制加入）
+*[Tt][Ee][Mm][Pp]*
+# 名字含 Template 的文件与目录不是临时文件，重新收入（必须位于 Temp 模式之后；父目录本身被排除时救不回）
+!*[Tt][Ee][Mm][Pp][Ll][Aa][Tt][Ee]*
+
+# 编辑器
+.vscode/
+
+# 本分支方针（2026-10-04 用户裁定）：测试文件不入库；上游自带的已跟踪测试不受影响
+/test/
