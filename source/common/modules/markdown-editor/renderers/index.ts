@@ -26,6 +26,8 @@ import { renderIframes } from './render-iframes'
 import { renderEmphasis } from './render-emphasis'
 import { renderCode } from './render-code'
 import { renderPandoc } from './render-pandoc-div-span'
+import { renderHtmlSpans } from './render-html-span'
+import { renderHtmlBlocks } from './render-html-block'
 import { renderFormulas } from './render-formula'
 import { configField, configUpdateEffect, type EditorConfiguration } from '../util/configuration'
 import type { EditorView } from '@codemirror/view'
@@ -72,6 +74,8 @@ function configureRenderers (config: Partial<EditorConfiguration>, ext?: Extensi
     updateExtension(renderEmphasis, config.renderEmphasis, ext)
     updateExtension(renderBlockquotes, config.renderEmphasis, ext)
     updateExtension(renderPandoc, config.renderPandoc, ext)
+    updateExtension(renderHtmlSpans, config.renderPandoc, ext)
+    updateExtension(renderHtmlBlocks, config.renderPandoc, ext)
     updateExtension(renderFormulas, true, ext)
     updateExtension(renderHorizontalRules, config.renderHorizontalRules, ext)
   }
