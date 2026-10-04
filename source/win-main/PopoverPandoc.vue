@@ -1,11 +1,9 @@
 <template>
   <PopoverWrapper v-bind:target="props.target" v-on:close="emit('close')">
     <div class="pandoc-div-span">
-      <TabBar
-        v-bind:tabs="tabs"
-        v-bind:current-tab="pandocType"
-        v-on:tab="pandocType = $event as 'div'|'span'"
-      ></TabBar>
+      <p class="pandoc-popover-heading">
+        {{ headingLabel }}
+      </p>
       <hr>
       <TextControl
         ref="identifiers"
@@ -50,20 +48,20 @@
  */
 import PopoverWrapper from '@common/vue/PopoverWrapper.vue'
 import TextControl from '@common/vue/form/elements/TextControl.vue'
-import TabBar, { type TabbarControl } from '@common/vue/TabBar.vue'
 import { trans } from '@common/i18n-renderer'
 import { ref, computed } from 'vue'
 
 const props = defineProps<{
   target: HTMLElement
+  // Which structure to insert. The toolbar has one button per structure, so
+  // the popover no longer offers the choice itself.
+  pandocType: 'div'|'span'
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'insert-pandoc', value: { type: string, attributes: string }): void
 }>()
-
-const pandocType = ref<'div'|'span'>('div')
 
 const identifierQuery = ref('')
 const identifierPlaceholder: string = trans('#identifier')
@@ -74,12 +72,11 @@ const classesPlaceholder: string = trans('.classes')
 const attributesQuery = ref('')
 const attributesPlaceholder: string = trans('key=value')
 
-const insertPandocButtonLabel = computed(() => trans(`Insert ${pandocType.value === 'div' ? 'Fenced Div' : 'Bracketed Span'}`))
+const structureLabel = computed(() => props.pandocType === 'div' ? 'Fenced Div' : 'Bracketed Span')
 
-const tabs: TabbarControl[] = [
-  { id: 'div', label: trans('Div'), target: 'div' },
-  { id: 'span', label: trans('Span'), target: 'span' },
-]
+const headingLabel = computed(() => trans(`Pandoc ${structureLabel.value}`))
+
+const insertPandocButtonLabel = computed(() => trans(`Insert ${structureLabel.value}`))
 
 function handleClick (): void {
   const formatAttributes = (input: string, prefix: string, join: string = ' '): string =>
@@ -92,7 +89,7 @@ function handleClick (): void {
 
   const pandocAttributesString: string = formatAttributes(`${formatAttributes(formatAttributes(identifierQuery.value, '', '-'), '#')} ${formatAttributes(classesQuery.value, '.')} ${attributesQuery.value}`, '')
 
-  emit('insert-pandoc', { type: pandocType.value, attributes: pandocAttributesString })
+  emit('insert-pandoc', { type: props.pandocType, attributes: pandocAttributesString })
   emit('close')
 }
 </script>
@@ -102,13 +99,9 @@ body {
   .pandoc-div-span {
     margin: 5px;
 
-    .system-tablist {
-      padding: 0px;
+    .pandoc-popover-heading {
       margin: 5px;
-
-      button {
-        margin: 0px;
-      }
+      font-weight: bold;
     }
 
     button {
