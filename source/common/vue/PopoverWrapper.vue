@@ -19,6 +19,18 @@ type Placement = 'above'|'below'|'left'|'right'
 const props = defineProps<{
   target: HTMLElement
   placementPriorities?: Placement[]
+  /**
+   * When true, clicks outside the popover do not close it -- the popover
+   * behaves like a persistent panel that only its owner closes (used by the
+   * Pandoc attribute panel, R22). Escape still closes it.
+   */
+  persistent?: boolean
+  /**
+   * When true, dragging an element of the slot content that carries the class
+   * popover-drag-handle moves the popover; once moved, it stays where the
+   * user put it (content updates no longer re-place it) until it is closed.
+   */
+  draggable?: boolean
 }>()
 
 const emit = defineEmits<(e: 'close') => void>()
@@ -57,12 +69,18 @@ const MIN_ARROW_SIZE = 5
 const DOCUMENT_MARGIN = 10
 
 onMounted(() => {
-  document.addEventListener('mousedown', onClick)
-  document.addEventListener('contextmenu', onClick)
+  if (!(props.persistent ?? false)) {
+    document.addEventListener('mousedown', onClick)
+    document.addEventListener('contextmenu', onClick)
+  }
   document.addEventListener('resize', onResize)
 
   // Allow closing of the popover with Escape
   popupWrapper.value?.addEventListener('keydown', onKeydown)
+
+  if (props.draggable ?? false) {
+    popupWrapper.value?.addEventListener('mousedown', onDragStart)
+  }
 
   place() // Initial placement
 })
@@ -72,6 +90,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('contextmenu', onClick)
   document.removeEventListener('resize', onResize)
   popupWrapper.value?.removeEventListener('keydown', onKeydown)
+  popupWrapper.value?.removeEventListener('mousedown', onDragStart)
+  stopDragging()
 })
 
 onUpdated(place)
@@ -130,11 +150,106 @@ function onResize (event: UIEvent): void {
   place()
 }
 
+// BEGIN: DRAGGING (R22). The position the user dragged the popover to; while
+// set, place() only keeps the popover inside the viewport instead of
+// re-placing it next to the target.
+let draggedPosition: { left: number, top: number }|null = null
+let onDragMove: ((event: MouseEvent) => void)|null = null
+let onDragEnd: (() => void)|null = null
+
+function stopDragging (): void {
+  if (onDragMove !== null) {
+    document.removeEventListener('mousemove', onDragMove)
+    onDragMove = null
+  }
+  if (onDragEnd !== null) {
+    document.removeEventListener('mouseup', onDragEnd)
+    onDragEnd = null
+  }
+}
+
+/**
+ * Clamps a dragged position so that the popover stays inside the viewport.
+ *
+ * @param   {number}  left  Intended left
+ * @param   {number}  top   Intended top
+ *
+ * @return  {{ left: number, top: number }} The clamped position
+ */
+function clampToViewport (left: number, top: number): { left: number, top: number } {
+  const wrapper = popupWrapper.value
+  if (wrapper === null) {
+    return { left, top }
+  }
+  const maxLeft = window.innerWidth - wrapper.offsetWidth - DOCUMENT_MARGIN
+  const maxTop = window.innerHeight - wrapper.offsetHeight - DOCUMENT_MARGIN
+  return {
+    left: Math.min(Math.max(left, DOCUMENT_MARGIN), Math.max(maxLeft, DOCUMENT_MARGIN)),
+    top: Math.min(Math.max(top, DOCUMENT_MARGIN), Math.max(maxTop, DOCUMENT_MARGIN))
+  }
+}
+
+function applyDraggedPosition (): void {
+  const wrapper = popupWrapper.value
+  if (wrapper === null || draggedPosition === null) {
+    return
+  }
+  draggedPosition = clampToViewport(draggedPosition.left, draggedPosition.top)
+  wrapper.style.left = `${draggedPosition.left}px`
+  wrapper.style.top = `${draggedPosition.top}px`
+  // The arrow still points at the original spot; hide it once dragged
+  if (popupArrow.value !== null) {
+    popupArrow.value.style.display = 'none'
+  }
+}
+
+/**
+ * Starts dragging when the press landed on a drag handle of the slot content.
+ *
+ * @param   {MouseEvent}  event  The mousedown on the popover
+ */
+function onDragStart (event: MouseEvent): void {
+  const wrapper = popupWrapper.value
+  const target = event.target as HTMLElement|null
+  if (wrapper === null || target === null || event.button !== 0) {
+    return
+  }
+  if (target.closest('.popover-drag-handle') === null) {
+    return
+  }
+  event.preventDefault()
+  stopDragging()
+
+  const startX = event.clientX
+  const startY = event.clientY
+  const startLeft = wrapper.offsetLeft
+  const startTop = wrapper.offsetTop
+
+  onDragMove = (moveEvent: MouseEvent) => {
+    draggedPosition = {
+      left: startLeft + moveEvent.clientX - startX,
+      top: startTop + moveEvent.clientY - startY
+    }
+    applyDraggedPosition()
+  }
+  onDragEnd = () => { stopDragging() }
+  document.addEventListener('mousemove', onDragMove)
+  document.addEventListener('mouseup', onDragEnd)
+}
+// END: DRAGGING
+
 /**
  * Places the popover correctly.
  */
 function place (): void {
   if (popupWrapper.value === null || popupArrow.value === null) {
+    return
+  }
+
+  // Once the user dragged the popover, content updates must not snap it back
+  // to the target; only keep it inside the viewport
+  if (draggedPosition !== null) {
+    applyDraggedPosition()
     return
   }
 
