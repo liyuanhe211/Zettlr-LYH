@@ -105,13 +105,11 @@ export const inlineCodeBackground = layer({
             return false
           }
 
-          let start = node.from
-          let end = node.to
-
-          if (node.name === 'InlineCode') {
-            start += 1
-            end -= 1
-          }
+          // NOTE: For inline code, the range includes the backticks, since
+          // those remain visible (see the InlineCode case in the emphasis
+          // renderer) and should look like part of the code span.
+          const start = node.from
+          const end = node.to
 
           const localMarkers = RectangleMarker.forRange(
             view,

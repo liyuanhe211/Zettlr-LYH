@@ -331,6 +331,12 @@ export const editorTheme = EditorView.baseTheme({
   '.cm-code-mark': {
     color: 'var(--zettlr-editor-primary-color)',
   },
+  // The backticks of inline code stay visible at all times, and should look
+  // exactly like the code they delimit, hence they get the code color instead
+  // of the color for formatting characters
+  '.inline-code > .cm-code-mark': {
+    color: 'var(--zettlr-editor-code-color)',
+  },
   '.cm-cursor-primary': {
     background: 'var(--zettlr-editor-primary-color)',
   },

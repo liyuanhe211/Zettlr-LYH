@@ -105,8 +105,21 @@ function hideFormattingCharacters (view: EditorView): RangeSet<Decoration> {
             }
             break
           }
+          case 'InlineCode': {
+            // The backticks of inline code always remain visible, regardless of
+            // where the cursor is, and are styled like the code they delimit
+            // (see the ".inline-code > .cm-code-mark" rule in the theme). NOTE
+            // that the math parser emits InlineCode nodes as well; the dollar
+            // signs delimiting inline math are still being hidden here.
+            const marks = node.node.getChildren('CodeMark')
+            for (const mark of marks) {
+              if (!view.state.sliceDoc(mark.from, mark.to).startsWith('`')) {
+                ranges.push(hiddenDeco.range(mark.from, mark.to))
+              }
+            }
+            break
+          }
           // For fenced code, also hide the CodeInfo
-          case 'InlineCode':
           case 'FencedCode': {
             const marks = node.node.getChildren('CodeMark')
             const infos = node.node.getChildren('CodeInfo')
