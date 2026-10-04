@@ -95,6 +95,12 @@ export interface MD2HTMLOptions {
    *                         attribute for the resulting `<img>` tag.
    */
   onImageSrc?: (src: string) => string
+  /**
+   * If provided, the contents of every raw HTML block are wrapped in a div
+   * with this class, so that a stylesheet can treat them like the editor's
+   * HTML block previews.
+   */
+  htmlBlockWrapperClass?: string
 }
 
 /**
@@ -253,11 +259,13 @@ export function nodeToHTML (node: ASTNode|ASTNode[], options: MD2HTMLOptions, in
     const attr = renderNodeAttributes(node)
     return `${node.whitespaceBefore}<img${attr} />`
   } else if (node.type === 'Link') {
-    const title = _.escape(node.title?.value ?? node.alt.value)
+    const label = node.alt.value.replace(/<[^>]*>/g, '')
+    const title = _.escape(node.title?.value ?? label)
     addAttribute(node, 'href', node.url)
     addAttribute(node, 'title', title)
     const attr = renderNodeAttributes(node)
-    return `${node.whitespaceBefore}<a${attr}>${title}</a>`
+    const body = node.children !== undefined ? nodeToHTML(node.children, options, indent) : _.escape(label)
+    return `${node.whitespaceBefore}<a${attr}>${body}</a>`
   } else if (node.type === 'OrderedList') {
     if (node.startsAt > 1) {
       addAttribute(node, 'start', String(node.startsAt))
@@ -299,7 +307,11 @@ export function nodeToHTML (node: ASTNode|ASTNode[], options: MD2HTMLOptions, in
         cells.push(nodeToHTML(cell.children, options, indent))
       }
       const tag = row.isHeaderOrFooter ? 'th' : 'td'
-      const content = cells.map(c => `<${tag}>${c}</${tag}>`).join('\n')
+      const content = cells.map((c, i) => {
+        const alignment = node.alignment[i]
+        const style = alignment !== null && alignment !== undefined ? ` style="text-align: ${alignment}"` : ''
+        return `<${tag}${style}>${c}</${tag}>`
+      }).join('\n')
       const attr = renderNodeAttributes(row)
       if (row.isHeaderOrFooter) {
         rows.push(`${row.whitespaceBefore}<thead>\n<tr${attr}>\n${content}\n</tr>\n</thead>`)
@@ -338,7 +350,11 @@ export function nodeToHTML (node: ASTNode|ASTNode[], options: MD2HTMLOptions, in
     const tagInfo = getTagInfo(node)
 
     if (tagInfo.containsHTML) {
-      return nodeToHTML(node.children, options, indent)
+      const html = nodeToHTML(node.children, options, indent)
+      if (node.name === 'HTMLBlock' && options.htmlBlockWrapperClass !== undefined) {
+        return `${node.whitespaceBefore}<div class="${options.htmlBlockWrapperClass}">${html}</div>`
+      }
+      return html
     }
 
     if ([ 'div', 'span' ].includes(tagInfo.tagName) && node.children.length === 0) {

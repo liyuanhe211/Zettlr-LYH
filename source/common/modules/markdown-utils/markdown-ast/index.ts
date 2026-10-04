@@ -147,6 +147,11 @@ export interface LinkOrImage extends MDNode {
    * Optional title text (i.e. what can be added after the URL in quotes)
    */
   title?: TextNode
+  /**
+   * The parsed contents of a link's label (inline formatting, raw HTML, etc.).
+   * Only set for links written with square brackets.
+   */
+  children?: ASTNode[]
 }
 
 /**
@@ -529,6 +534,47 @@ export type ASTNode = Document | Comment | Footnote | FootnoteRef | FootnoteRefL
 export type ASTNodeType = ASTNode['type']
 
 /**
+ * Removes the angle brackets around a link destination (`[a](<b c.md>)`),
+ * which only serve to allow spaces and brackets inside the destination.
+ *
+ * @param   {string}  url  The destination as written in the source
+ *
+ * @return  {string}       The destination without the angle brackets
+ */
+function stripUrlAngleBrackets (url: string): string {
+  return url.startsWith('<') && url.endsWith('>') ? url.slice(1, -1) : url
+}
+
+/**
+ * Parses the contents of a link's label, i.e. everything between its opening
+ * `[` and its closing `]`, into AST nodes. Text between child nodes becomes
+ * text nodes.
+ *
+ * @param   {SyntaxNode}  openMark   The LinkMark `[`
+ * @param   {SyntaxNode}  closeMark  The LinkMark `]`
+ * @param   {string}      markdown   The Markdown source
+ *
+ * @return  {ASTNode[]}              The label's contents
+ */
+function parseLinkLabel (openMark: SyntaxNode, closeMark: SyntaxNode, markdown: string): ASTNode[] {
+  const children: ASTNode[] = []
+  let currentIndex = openMark.to
+  let child = openMark.nextSibling
+  while (child !== null && child.from < closeMark.from) {
+    if (child.from > currentIndex) {
+      children.push(genericTextNode(currentIndex, child.from, markdown.substring(currentIndex, child.from)))
+    }
+    children.push(parseNode(child, markdown))
+    currentIndex = child.to
+    child = child.nextSibling
+  }
+  if (closeMark.from > currentIndex) {
+    children.push(genericTextNode(currentIndex, closeMark.from, markdown.substring(currentIndex, closeMark.from)))
+  }
+  return children
+}
+
+/**
  * Parses a single Lezer style SyntaxNode to an ASTNode.
  *
  * @param   {SyntaxNode}  node      The node to convert
@@ -579,19 +625,20 @@ export function parseNode (node: SyntaxNode, markdown: string): ASTNode {
         to: node.to,
         whitespaceBefore: getWhitespaceBeforeNode(node, markdown),
         title: title === null ? undefined : genericTextNode(title.from, title.to, markdown.substring(title.from, title.to)),
-        url: markdown.substring(url.from, url.to),
+        url: stripUrlAngleBrackets(markdown.substring(url.from, url.to)),
         alt: marks.length >= 2
           ? genericTextNode(marks[0].to, marks[1].from, markdown.substring(marks[0].to, marks[1].from))
           : genericTextNode(url.from, url.to, markdown.substring(url.from, url.to))
       }
 
+      if (node.name === 'Link' && marks.length >= 2) {
+        astNode.children = parseLinkLabel(marks[0], marks[1], markdown)
+      }
+
       return astNode
     }
     case 'URL': {
-      let url = markdown.substring(node.from, node.to)
-      if (url.startsWith('<') && url.endsWith('>')) {
-        url = url.slice(1, url.length - 1)
-      }
+      const url = stripUrlAngleBrackets(markdown.substring(node.from, node.to))
 
       const astNode: LinkOrImage = {
         type: 'Link',
