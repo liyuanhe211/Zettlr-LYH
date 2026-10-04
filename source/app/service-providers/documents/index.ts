@@ -33,10 +33,12 @@ import type { CodeFileDescriptor, MDFileDescriptor } from '@dts/common/fsal'
 import { countAll } from '@common/util/counter'
 import { markdownToAST } from '@common/modules/markdown-utils'
 import isFile from '@common/util/is-file'
+import formatSize from '@common/util/format-size'
 import { trans } from '@common/i18n-main'
 import type FSALWatchdog from '@providers/fsal/fsal-watchdog'
 import { getDocumentTypeForExtension, hasImageExt, hasMdOrCodeExt, hasPDFExt } from 'source/common/util/file-extention-checks'
 import isDir from 'source/common/util/is-dir'
+import DocumentBackupManager from './backup-manager'
 
 type DocumentWindows = Record<string, DocumentTree>
 type DocumentWindowsJSON = Record<string, BranchNodeJSON|LeafNodeJSON>
@@ -47,6 +49,29 @@ const MAX_VERSION_HISTORY = 100
 const DELAYED_SAVE_TIMEOUT = 5000
 // Even "immediate" should not save immediately to prevent race conditions on slower systems
 const IMMEDIATE_SAVE_TIMEOUT = 500
+
+/**
+ * Formats a timestamp (ms since epoch) as a local "YYYY-MM-DD HH:MM:SS" string
+ * for user-facing dialogs.
+ */
+function formatTimestamp (timestamp: number): string {
+  const date = new Date(timestamp)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+/**
+ * Formats a byte count for user-facing dialogs: a rounded KB/MB figure with
+ * the exact byte count in parentheses, so that two versions of similar size
+ * remain distinguishable.
+ */
+function describeSize (bytes: number): string {
+  if (bytes < 1024) {
+    return bytes === 1 ? '1 byte' : `${bytes} bytes`
+  }
+
+  return `${formatSize(bytes, true)} (${bytes.toLocaleString('en-US')} bytes)`
+}
 
 export interface DocumentsUpdateContext {
   windowId?: string
@@ -123,6 +148,13 @@ interface Document {
    * want autosaving.
    */
   saveTimeout: undefined|NodeJS.Timeout
+  /**
+   * Timestamp (ms since epoch) of the user's last edit to this document in the
+   * editor. For a document restored from the backup cache this starts as the
+   * time the backup was last written; undefined if the document has not been
+   * edited yet.
+   */
+  lastEditedAt: number|undefined
 }
 
 export type DocumentAuthorityIPCAPI = IPCAPI<{
@@ -218,6 +250,22 @@ export default class DocumentManager extends ProviderContract {
    */
   private readonly documents: Document[]
 
+  /**
+   * Persists unsaved editing states across restarts (Notepad++-style backups)
+   *
+   * @var {DocumentBackupManager}
+   */
+  private readonly _backups: DocumentBackupManager
+
+  /**
+   * Holds in-flight getDocument calls so that concurrent requests for the
+   * same file (e.g. the same file open in two panes during boot) share one
+   * load instead of racing each other.
+   *
+   * @var {Map<string, Promise<{ content: string, type: DocumentType, startVersion: number }>>}
+   */
+  private readonly _pendingDocumentLoads: Map<string, Promise<{ content: string, type: DocumentType, startVersion: number }>>
+
   private _shuttingDown: boolean
 
   private readonly _lastEditor: {
@@ -236,6 +284,11 @@ export default class DocumentManager extends ProviderContract {
     this._ignoreChanges = []
     this._remoteChangeDialogShownFor = []
     this.documents = []
+    this._backups = new DocumentBackupManager(
+      path.join(app.getPath('userData'), 'unsaved-changes'),
+      this._app.log
+    )
+    this._pendingDocumentLoads = new Map()
     this._shuttingDown = false
     this._lastEditor = {
       windowId: undefined,
@@ -371,115 +424,57 @@ export default class DocumentManager extends ProviderContract {
       }
     })
 
-    // Listen to the before-quit event by which we make sure to only quit the
-    // application if the status of possibly modified files has been cleared.
-    // We listen to this event, because it will fire *before* the process
-    // attempts to close the open windows, including the main window, which
-    // would result in a loss of data. NOTE: The exception is the auto-updater
-    // which will close the windows before this event. But because we also
-    // listen to close-events on the main window, we should be able to handle
-    // this, if we ever switched to the auto updater.
+    // Listen to the before-quit event. Since every unsaved editing state is
+    // continuously mirrored into the backup cache, quitting must NOT prompt
+    // the user to save: the app quits with the unsaved changes preserved in
+    // the cache, and the next start restores them into the reopened tabs
+    // (Notepad++-style session behavior). We only have to make sure that any
+    // pending (debounced) backup write reaches the disk before quitting.
     app.on('before-quit', (event) => {
-      if (!this.isClean()) {
+      this._shuttingDown = true
+
+      if (this._backups.hasPendingPersists()) {
         event.preventDefault()
-
-        // NOTE: We are re-implementing `askSaveChanges` here since we cannot
-        // give the user the choice to cancel.
-        // TODO: Once the window management logic is put here, we have better
-        // control over the windows and can ask this question *before* the
-        // window is being closed.
-        const opt: MessageBoxOptions = {
-          type: 'question',
-          buttons: [
-            trans('Save changes'),
-            trans('Discard changes'),
-            trans('Cancel')
-          ],
-          defaultId: 0,
-          cancelId: 2,
-          title: trans('Unsaved changes'),
-          message: trans('There are unsaved changes. Do you want to save or discard them?')
-        }
-
-        dialog.showMessageBox(opt)
-          .then(async ({ response }) => {
-            // 0 = Save, 1 = Don't save, 2 = Cancel
-            if (response === 2) {
-              this._app.log.verbose('User cancelled save-dialog; not quitting.')
-              return // Do nothing
-            }
-
-            // Apply the choice to all open documents
-            for (const document of this.documents) {
-              if (response === 0) {
-                await this.saveFile(document.filePath)
-              } else {
-                document.lastSavedVersion = document.currentVersion
-              }
-            }
-
+        this._backups.flushAll()
+          .catch(err => {
+            this._app.log.error('[DocumentManager] Could not flush unsaved-changes backups on quit!', err)
+          })
+          .finally(() => {
             app.quit()
           })
-          .catch(err => {
-            this._app.log.error('[DocumentManager] Cannot ask user to save or omit changes!', err)
-          })
-      } else {
-        this._shuttingDown = true
       }
     })
   } // END constructor
 
   /**
-   * Use this method to ask the user whether or not the window identified with
-   * the windowId may be closed. If this function returns true, the user agreed
-   * to drop all changes, or there were no changes contained in the window.
+   * Use this method to ask whether or not the window identified with the
+   * windowId may be closed. Since every unsaved editing state is continuously
+   * mirrored into the backup cache, the window may always be closed without
+   * prompting the user; this method merely makes sure any pending backup
+   * write reaches the disk first.
    *
    * @param   {string}            windowId  The window in question
    *
    * @return  {Promise<boolean>}            Returns false if the window may not be closed
    */
   public async askUserToCloseWindow (windowId: string): Promise<boolean> {
-    if (this.isClean(windowId)) {
-      return true
-    }
+    if (!this.isClean(windowId, 'window')) {
+      await this._backups.flushAll()
 
-    // TODO: Check if the same (modified) files are also open in other windows.
-    // If so, we can treat this window as if it contains no changes, since the
-    // document is still open somewhere else.
-
-    const result = await this._app.windows.askSaveChanges()
-    // 0 = Save, 1 = Don't save, 2 = Cancel
-    if (result.response === 1) {
-      // Mark everything as clean TODO: As of now this would mean that if the
-      // documents are open in other windows, they would still reflect the
-      // "wrong" (b/c omitted, unsaved) state!
+      // Mark everything as clean so that the close can proceed; the actual
+      // editing states are preserved in the backup cache.
       for (const document of this.documents) {
         document.lastSavedVersion = document.currentVersion
       }
-
-      // If we're not shutting down, this function will only be called for when
-      // the user wants to actively close a window for good
-      if (!this._shuttingDown) {
-        this.closeWindow(windowId)
-      }
-
-      return true
-    } else if (result.response === 0) {
-      // Save all docs
-      for (const document of this.documents) {
-        await this.saveFile(document.filePath)
-      }
-
-      // If we're not shutting down, this function will only be called for when
-      // the user wants to actively close a window for good
-      if (!this._shuttingDown) {
-        this.closeWindow(windowId)
-      }
-
-      return true
-    } else {
-      return false
     }
+
+    // If we're not shutting down, this function will only be called for when
+    // the user wants to actively close a window for good
+    if (!this._shuttingDown) {
+      this.closeWindow(windowId)
+    }
+
+    return true
   }
 
   async boot (): Promise<void> {
@@ -526,6 +521,19 @@ export default class DocumentManager extends ProviderContract {
       this._windows[key] = new DocumentTree()
       this.broadcastEvent(DP_EVENTS.NEW_WINDOW, { key })
     }
+
+    // Prepare the unsaved-changes backup cache: create the directory, remove
+    // expired backups (documents closed without saving more than two weeks
+    // ago), and start the retention clock for backups whose documents are not
+    // part of the restored session. This must happen before any editor
+    // requests documents, because getDocument consults the backup cache.
+    const sessionFilePaths: string[] = []
+    for (const key in this._windows) {
+      for (const leaf of this._windows[key].getAllLeafs()) {
+        sessionFilePaths.push(...leaf.tabMan.openFiles.map(f => f.path))
+      }
+    }
+    await this._backups.boot([...new Set(sessionFilePaths)])
 
     // Sync everything after boot
     this.syncWatchedFilePaths()
@@ -600,6 +608,10 @@ export default class DocumentManager extends ProviderContract {
   }
 
   async shutdown (): Promise<void> {
+    // Belt and braces: Make sure no unsaved editing state is lost even if the
+    // before-quit handler did not run (e.g. during an unusual shutdown path).
+    await this._backups.flushAll()
+
     // We MUST under all circumstances properly call the close() function on
     // every chokidar process we utilize. Otherwise, the fsevents dylib will
     // still hold on to some memory after the Electron process itself shuts down
@@ -626,13 +638,40 @@ export default class DocumentManager extends ProviderContract {
       }
     }
 
+    // Deduplicate concurrent loads of the same file: The backup check below
+    // may show a dialog, during which further requests for the same file
+    // (e.g. from a second editor pane) could arrive.
+    const pendingLoad = this._pendingDocumentLoads.get(filePath)
+    if (pendingLoad !== undefined) {
+      return await pendingLoad
+    }
+
+    const load = this._loadDocument(filePath)
+    this._pendingDocumentLoads.set(filePath, load)
+    try {
+      return await load
+    } finally {
+      this._pendingDocumentLoads.delete(filePath)
+    }
+  }
+
+  /**
+   * Loads a document from disk into the document authority. If the backup
+   * cache holds an unsaved editing state for the file that differs from the
+   * disk contents, that state is restored: silently, if the document counts
+   * as still open (i.e. it is part of the restored session), or after asking
+   * the user, if the document had been closed without saving.
+   *
+   * @param   {string}  filePath  The absolute path of the file to load
+   */
+  private async _loadDocument (filePath: string): Promise<{ content: string, type: DocumentType, startVersion: number }> {
     // TODO: We also need to be able to load files not present in the file tree!
     const descriptor = await this._app.fsal.getDescriptorForAnySupportedFile(filePath)
     if (descriptor === undefined || descriptor.type === 'other') {
       throw new Error(`Cannot load file ${filePath}`) // TODO: Proper error handling & state recovery!
     }
 
-    const content = await this._app.fsal.loadAnySupportedFile(filePath)
+    const diskContent = await this._app.fsal.loadAnySupportedFile(filePath)
 
     let type = DocumentType.Markdown
 
@@ -643,23 +682,91 @@ export default class DocumentManager extends ProviderContract {
       }
     }
 
+    // Only files open in some editor pane belong into the document authority.
+    // A request for any other file comes from an editor that is being torn
+    // down (e.g. right after its tab was closed); registering the file again
+    // would leave an orphaned document behind and, worse, re-trigger the
+    // backup restore prompt for a document the user has just closed.
+    if (!this.isOpenInAnyLeaf(filePath)) {
+      return { content: diskContent, type, startVersion: 0 }
+    }
+
+    // Check the backup cache for an unsaved editing state of this file
+    let content = diskContent
+    let restoredFromBackup = false
+    let lastEditedAt: number|undefined
+    const backup = await this._backups.read(filePath)
+    if (backup !== undefined) {
+      if (backup.content === diskContent) {
+        // The backup equals the disk state (e.g. the file has been saved by
+        // other means in the meantime), so it holds no information anymore.
+        await this._backups.remove(filePath)
+      } else if (backup.metadata.closedAt === null) {
+        // The document counts as open (part of the restored session), so
+        // silently restore the unsaved editing state, exactly as it was
+        // before the restart.
+        content = backup.content
+        restoredFromBackup = true
+        lastEditedAt = backup.metadata.updatedAt
+      } else {
+        // The document had been closed without saving, but its editing state
+        // was retained. Let the user decide what to do with it.
+        const options: MessageBoxOptions = {
+          type: 'question',
+          title: trans('Unsaved changes found'),
+          message: trans('%s has unsaved changes from a previous session', path.basename(filePath)),
+          detail: trans('This file was closed without saving, but Zettlr has retained the unsaved changes. Do you want to restore the unsaved changes, or discard them and load the file as it is on disk?'),
+          buttons: [
+            trans('Restore unsaved changes'),
+            trans('Discard them and load the file from disk')
+          ],
+          defaultId: 0,
+          cancelId: 0
+        }
+        const { response } = await dialog.showMessageBox(options)
+        if (response === 0) {
+          content = backup.content
+          restoredFromBackup = true
+          lastEditedAt = backup.metadata.updatedAt
+          await this._backups.markOpen(filePath)
+        } else {
+          await this._backups.remove(filePath)
+        }
+      }
+    }
+
+    // The user may have closed the tab while the restore prompt was shown.
+    if (!this.isOpenInAnyLeaf(filePath)) {
+      if (restoredFromBackup) {
+        await this._backups.markClosed(filePath)
+      }
+      return { content, type, startVersion: 0 }
+    }
+
     const doc: Document = {
       filePath,
       type,
       descriptor,
       currentVersion: 0,
       minimumVersion: 0,
-      lastSavedVersion: 0,
-      lastSavedContent: content,
+      // A document restored from a backup must immediately count as modified,
+      // since its contents differ from what is stored on disk.
+      lastSavedVersion: restoredFromBackup ? -1 : 0,
+      lastSavedContent: diskContent,
       updates: [],
       document: Text.of(content.split('\n')),
       lastSavedCharCount: descriptor.type === 'file' ? descriptor.charCount : 0,
       lastSavedWordCount: descriptor.type === 'file' ? descriptor.wordCount : 0,
-      saveTimeout: undefined
+      saveTimeout: undefined,
+      lastEditedAt
     }
 
     this.documents.push(doc)
     this.syncWatchedFilePaths()
+
+    if (restoredFromBackup) {
+      this.broadcastEvent(DP_EVENTS.CHANGE_FILE_STATUS, { filePath, status: 'modification' })
+    }
 
     return { content, type, startVersion: 0 }
   }
@@ -667,6 +774,14 @@ export default class DocumentManager extends ProviderContract {
   private async pullUpdates (filePath: string, clientVersion: number): Promise<Update[]|false> {
     const doc = this.documents.find(doc => doc.filePath === filePath)
     if (doc === undefined) {
+      if (!this.isOpenInAnyLeaf(filePath)) {
+        // The document has been closed. The requesting editor still had a
+        // pending pull when closing the file broadcast its final status
+        // change; it is about to be destroyed, so there is nothing to sync.
+        // Returning false here would make it reload the closed document.
+        return []
+      }
+
       // Indicate to the editor that they should get the document (again). This
       // handles the case where the document has been remotely modified and thus
       // removed from the document array.
@@ -733,8 +848,15 @@ current contents from the editor somewhere else, and restart the application.`
       }
     }
 
+    doc.lastEditedAt = Date.now()
+
     // Notify all clients, they will then request the update
     this.broadcastEvent(DP_EVENTS.CHANGE_FILE_STATUS, { filePath, status: 'modification' })
+
+    // Mirror the new editing state into the backup cache (debounced) so that
+    // unsaved changes survive a restart or crash without touching the source
+    // file. The content is computed lazily when the backup is written.
+    this._backups.schedulePersist(filePath, () => doc.document.toString())
 
     // Drop all updates that exceed the amount of updates we allow.
     while (doc.updates.length > MAX_VERSION_HISTORY) {
@@ -746,6 +868,14 @@ current contents from the editor somewhere else, and restart the application.`
 
     // No autosave
     if (autoSave === 'off') {
+      return true
+    }
+
+    // While the "file changed on disk" dialog is open for this file, an
+    // autosave would overwrite the newer disk contents before the user has
+    // decided how to resolve the conflict. handleRemoteChange cleared the
+    // pending timeout; do not arm a new one until the dialog is resolved.
+    if (this._remoteChangeDialogShownFor.includes(filePath)) {
       return true
     }
 
@@ -873,11 +1003,13 @@ current contents from the editor somewhere else, and restart the application.`
     // After here, the document will in some way be opened.
     this._app.recentDocs.add(filePath)
 
-    const { openFiles, openWorkspaces } = this._app.config.get().app
-    if (!openFiles.includes(filePath) && openWorkspaces.every(p => !filePath.startsWith(p))) {
-      // The file just opened is outside the current opened roots -> add as a
-      // standalone root file.
-      this._app.config.addPath(filePath)
+    const { openWorkspaces } = this._app.config.get().app
+    if (openWorkspaces.every(p => !filePath.startsWith(p))) {
+      // The file just opened is outside the current opened workspaces -> record
+      // it in the open history. NOTE that we do this unconditionally: files
+      // already contained in the history must be moved back to the front so
+      // that the most recently opened file is listed first.
+      this._app.config.recordOpenedFile(filePath)
     }
 
     if (leaf.tabMan.openFiles.map(x => x.path).includes(filePath)) {
@@ -949,6 +1081,10 @@ current contents from the editor somewhere else, and restart the application.`
       const result = await this._app.windows.askSaveChanges(detail)
       // 0 = Save, 1 = Don't save, 2 = Cancel
       if (result.response === 1) {
+        // The user closed the document without saving. Retain the unsaved
+        // editing state in the backup cache (for two weeks) in case the
+        // close was a mistake; reopening the file will offer to restore it.
+        await this._backups.markClosed(filePath)
         // Clear the modification flag
         openFile.lastSavedVersion = openFile.currentVersion
         this.broadcastEvent(DP_EVENTS.CHANGE_FILE_STATUS, { filePath, status: 'modification' })
@@ -964,7 +1100,9 @@ current contents from the editor somewhere else, and restart the application.`
       this.documents.splice(this.documents.indexOf(openFile), 1)
     } else if (openFile !== undefined && numOpenInstances === 1) {
       // The file is not modified, but this is still the last instance, so we
-      // can close it without having to ask.
+      // can close it without having to ask. A clean document needs no backup,
+      // so remove any stray one.
+      await this._backups.remove(filePath)
       this.documents.splice(this.documents.indexOf(openFile), 1)
     }
 
@@ -1017,6 +1155,16 @@ current contents from the editor somewhere else, and restart the application.`
     // We also must splice the document out of our provider
     const idx = this.documents.findIndex(doc => doc.filePath === filePath)
     if (idx > -1) {
+      const doc = this.documents[idx]
+      if (doc.currentVersion !== doc.lastSavedVersion) {
+        // The document is force-closed (e.g. it was deleted on disk) while
+        // carrying unsaved changes. Retain those in the backup cache as a
+        // safety net -- it is the only remaining copy of the edits.
+        await this._backups.persistNow(filePath, doc.document.toString())
+        await this._backups.markClosed(filePath)
+      } else {
+        await this._backups.remove(filePath)
+      }
       this.documents.splice(idx, 1)
     }
 
@@ -1094,51 +1242,157 @@ current contents from the editor somewhere else, and restart the application.`
 
     const isModified = doc.lastSavedVersion !== doc.currentVersion
     const { alwaysReloadFiles } = this._app.config.get()
-    if (isModified || !alwaysReloadFiles) {
-      // The file is modified in buffer, or the user does not want to simply
-      // reload changes, so we cannot just overwrite anything
-      // Prevent multiple instances of the dialog, just ask once. The logic
-      // always retrieves the most recent version either way
-      if (this._remoteChangeDialogShownFor.includes(filePath)) {
-        return
-      }
-
-      this._remoteChangeDialogShownFor.push(filePath)
-      const filename = doc.descriptor.name
-
-      // Ask the user if we should replace the file
-      const response = await dialog.showMessageBox({
-        title: trans('File changed on disk'),
-        message: trans('%s changed on disk', filename),
-        detail: isModified
-          ? trans('%s has changed on disk, but the editor contains unsaved changes. Do you want to keep the current editor contents or load the file from disk?', filename)
-          : trans('Do you want to keep the current editor contents or load the file from disk?'),
-        type: 'question',
-        buttons: [
-          trans('Keep editor contents'),
-          trans('Load changes from disk')
-        ],
-        defaultId: 0,
-        checkboxLabel: trans('Always load changes from disk if there are no unsaved changes in the editor'),
-        checkboxChecked: alwaysReloadFiles
-      })
-
-      this._remoteChangeDialogShownFor.splice(this._remoteChangeDialogShownFor.indexOf(filePath), 1)
-
-      this._app.config.set('alwaysReloadFiles', response.checkboxChecked)
-
-      if (response.response === 0) {
-        // User does not want to load the disk contents. To ensure that the
-        // proper status is indicated, set the "lastSavedVersion" to one minus.
-        doc.lastSavedVersion--
-        this.broadcastEvent(DP_EVENTS.CHANGE_FILE_STATUS, { filePath, status: 'modification' })
-      } else {
-        await this.notifyRemoteChange(filePath)
-      }
-    } else {
+    if (!isModified && alwaysReloadFiles) {
       // The user has activated the setting to alwaysReloadFiles.
       await this.notifyRemoteChange(filePath)
+      return
     }
+
+    // The file is modified in buffer, or the user does not want to simply
+    // reload changes, so we cannot just overwrite anything
+    // Prevent multiple instances of the dialog, just ask once. The logic
+    // always retrieves the most recent version either way
+    if (this._remoteChangeDialogShownFor.includes(filePath)) {
+      return
+    }
+
+    this._remoteChangeDialogShownFor.push(filePath)
+    const filename = doc.descriptor.name
+
+    try {
+      if (isModified) {
+        // A pending autosave would overwrite the (newer) disk contents while
+        // the dialog is open, silently destroying the very changes the user is
+        // being asked about. Suspend it; pushUpdates will not re-arm it while
+        // the dialog is registered in _remoteChangeDialogShownFor.
+        clearTimeout(doc.saveTimeout)
+        doc.saveTimeout = undefined
+
+        const editorByteSize = Buffer.byteLength(this.serializeEditorContents(doc), 'utf-8')
+        const editorEditTime = doc.lastEditedAt !== undefined ? formatTimestamp(doc.lastEditedAt) : 'unknown'
+
+        const response = await dialog.showMessageBox({
+          title: 'File Modified on Disk',
+          message: `"${filename}" was modified outside of Zettlr`,
+          detail: 'This file has just been modified outside of Zettlr, but the editor still contains unsaved changes, so the two versions differ.\n\n' +
+            `New version on disk: modified ${formatTimestamp(metadata.modtime)}, size ${describeSize(metadata.size)}\n` +
+            `Editor contents: last edited ${editorEditTime}, size ${describeSize(editorByteSize)}\n\n` +
+            'Choose how to proceed:\n\n' +
+            '"Back Up and Load from Disk": Saves the current editor contents as a timestamped backup file in the same folder, then loads the new version from disk. Nothing is lost.\n\n' +
+            '"Discard Changes and Load from Disk": Loads the new version from disk; the unsaved changes in the editor are discarded.\n\n' +
+            '"Keep Editor Contents": Does not load the changes from disk. The file stays modified, and saving it will overwrite the version on disk.',
+          type: 'question',
+          buttons: [
+            'Back Up and Load from Disk',
+            'Discard Changes and Load from Disk',
+            'Keep Editor Contents'
+          ],
+          defaultId: 0,
+          cancelId: 2,
+          noLink: true
+        })
+
+        if (response.response === 0) {
+          let backupPath: string
+          try {
+            backupPath = await this.writeEditorBackupFile(doc)
+          } catch (err: unknown) {
+            // Without a successful backup we must not load the disk contents,
+            // otherwise the editor changes would be lost after all. Fall back
+            // to keeping the editor contents.
+            const message = err instanceof Error ? err.message : String(err)
+            dialog.showErrorBox(
+              'Could Not Write Backup File',
+              `Could not write a backup file for "${filename}": ${message}\n\nTo avoid losing any content, the editor contents have been kept and the changes on disk have not been loaded.`
+            )
+            doc.lastSavedVersion--
+            this.broadcastEvent(DP_EVENTS.CHANGE_FILE_STATUS, { filePath, status: 'modification' })
+            return
+          }
+
+          this._app.log.info(`[Document Provider] Editor contents of ${filePath} backed up to ${backupPath} before reloading from disk.`)
+          await this.notifyRemoteChange(filePath)
+        } else if (response.response === 1) {
+          await this.notifyRemoteChange(filePath)
+        } else {
+          // User does not want to load the disk contents. To ensure that the
+          // proper status is indicated, set the "lastSavedVersion" to one minus.
+          doc.lastSavedVersion--
+          this.broadcastEvent(DP_EVENTS.CHANGE_FILE_STATUS, { filePath, status: 'modification' })
+        }
+      } else {
+        // Ask the user if we should replace the file
+        const response = await dialog.showMessageBox({
+          title: trans('File changed on disk'),
+          message: trans('%s changed on disk', filename),
+          detail: trans('Do you want to keep the current editor contents or load the file from disk?') + '\n\n' +
+            `New version on disk: modified ${formatTimestamp(metadata.modtime)}, size ${describeSize(metadata.size)}\n` +
+            `Editor contents (unchanged since last save): saved ${formatTimestamp(ourModtime)}, size ${describeSize(Buffer.byteLength(this.serializeEditorContents(doc), 'utf-8'))}`,
+          type: 'question',
+          buttons: [
+            trans('Keep editor contents'),
+            trans('Load changes from disk')
+          ],
+          defaultId: 0,
+          checkboxLabel: trans('Always load changes from disk if there are no unsaved changes in the editor'),
+          checkboxChecked: alwaysReloadFiles
+        })
+
+        this._app.config.set('alwaysReloadFiles', response.checkboxChecked)
+
+        if (response.response === 0) {
+          doc.lastSavedVersion--
+          this.broadcastEvent(DP_EVENTS.CHANGE_FILE_STATUS, { filePath, status: 'modification' })
+        } else {
+          await this.notifyRemoteChange(filePath)
+        }
+      }
+    } finally {
+      this._remoteChangeDialogShownFor.splice(this._remoteChangeDialogShownFor.indexOf(filePath), 1)
+    }
+  }
+
+  /**
+   * Writes the current (unsaved) editor contents of the given document to a
+   * timestamped backup file next to the original, so that the editing state
+   * survives a subsequent reload of the file from disk.
+   *
+   * @param   {Document}         doc  The document whose contents to back up
+   *
+   * @return  {Promise<string>}       The absolute path of the backup file
+   */
+  private async writeEditorBackupFile (doc: Document): Promise<string> {
+    // Same format as formatTimestamp, but with file-name-safe time separators
+    const stamp = formatTimestamp(Date.now()).replace(/:/g, '-')
+    const extension = path.extname(doc.filePath)
+    const base = path.basename(doc.filePath, extension)
+    const directory = path.dirname(doc.filePath)
+
+    let backupPath = path.join(directory, `${base} (Backup ${stamp})${extension}`)
+    let counter = 2
+    while (isFile(backupPath)) {
+      backupPath = path.join(directory, `${base} (Backup ${stamp} ${counter})${extension}`)
+      counter++
+    }
+
+    await this._app.fsal.writeTextFile(backupPath, this.serializeEditorContents(doc))
+    return backupPath
+  }
+
+  /**
+   * Serializes the current editor contents of the given document exactly as a
+   * regular save would write them to disk (BOM and original linefeeds for
+   * Markdown files, plain LF contents for code files).
+   *
+   * @param   {Document}  doc  The document to serialize
+   *
+   * @return  {string}         The serialized file contents
+   */
+  private serializeEditorContents (doc: Document): string {
+    const content = [...doc.document.iterLines()].join('\n')
+    return doc.descriptor.type === 'file'
+      ? doc.descriptor.bom + content.split('\n').join(doc.descriptor.linefeed)
+      : content
   }
 
   /**
@@ -1151,6 +1405,10 @@ current contents from the editor somewhere else, and restart the application.`
    * @param  {string}  newPath  The path it'll be afterwards
    */
   public async hasMovedFile (oldPath: string, newPath: string): Promise<void> {
+    // Let any backed-up editing state follow the file to its new path. This
+    // also covers retained backups of currently closed documents.
+    await this._backups.rename(oldPath, newPath)
+
     // Basically we just have to close the oldPath, and "open" the new path.
     const openDoc = this.documents.find(doc => doc.filePath === oldPath)
     if (openDoc === undefined) {
@@ -1162,6 +1420,14 @@ current contents from the editor somewhere else, and restart the application.`
     openDoc.descriptor.dir = path.dirname(newPath)
     openDoc.descriptor.name = path.basename(newPath)
     openDoc.descriptor.ext = path.extname(newPath)
+
+    // Edits that arrived while the backup was being re-keyed may have been
+    // scheduled under the old path; drop those and re-schedule under the new
+    // path so the backup always mirrors the newest state.
+    await this._backups.remove(oldPath)
+    if (openDoc.currentVersion !== openDoc.lastSavedVersion) {
+      this._backups.schedulePersist(newPath, () => openDoc.document.toString())
+    }
 
     const leafsToNotify: Array<[string, string]> = []
     await this.forEachLeaf(async (tabMan, windowId, leafId) => {
@@ -1304,6 +1570,11 @@ current contents from the editor somewhere else, and restart the application.`
    * @param {string} filePath The file in question
    */
   public async notifyRemoteChange (filePath: string): Promise<void> {
+    // The user has decided to load the state from disk, so any backed-up
+    // editing state is void. Remove it BEFORE the editors reload the file,
+    // since getDocument would otherwise restore the backup again.
+    await this._backups.remove(filePath)
+
     // Here we basically only need to close the document and wait for the
     // renderers to reload themselves with getDocument, which will automatically
     // open the new document.
@@ -1452,6 +1723,25 @@ current contents from the editor somewhere else, and restart the application.`
     return null
   }
 
+  /**
+   * Returns true if the given file is open in at least one editor pane in any
+   * window.
+   *
+   * @param   {string}   filePath  The absolute path to the file
+   *
+   * @return  {boolean}            Whether a tab for the file exists anywhere
+   */
+  private isOpenInAnyLeaf (filePath: string): boolean {
+    for (const windowId in this._windows) {
+      for (const leaf of this._windows[windowId].getAllLeafs()) {
+        if (leaf.tabMan.openFiles.some(file => file.path === filePath)) {
+          return true
+        }
+      }
+    }
+    return false
+  }
+
   public isModified (filePath: string): boolean {
     const doc = this.documents.find(doc => doc.filePath === filePath)
     if (doc !== undefined) {
@@ -1596,6 +1886,15 @@ current contents from the editor somewhere else, and restart the application.`
     }
 
     this._app.log.info(`[DocumentManager] File ${filePath} saved.`)
+
+    // The user's changes now live in the source file, so the backup of the
+    // unsaved editing state has served its purpose -- unless new edits have
+    // arrived while the save was running, in which case the backup (which
+    // mirrors the newest state) must stay.
+    if (doc.currentVersion === doc.lastSavedVersion) {
+      await this._backups.remove(filePath)
+    }
+
     this.broadcastEvent(DP_EVENTS.CHANGE_FILE_STATUS, { filePath, status: 'modification' })
     this.broadcastEvent(DP_EVENTS.FILE_SAVED, { filePath })
 
