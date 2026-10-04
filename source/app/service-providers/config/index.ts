@@ -29,6 +29,7 @@ import { loadData, trans } from '@common/i18n-main'
 import isFile from '@common/util/is-file'
 import { hasMdOrCodeExt } from '@common/util/file-extention-checks'
 import { ignorePath } from '@common/util/ignore-path'
+import { updateOpenHistory, OPEN_HISTORY_LIMIT } from '@common/util/open-history'
 import { showOnboardingWindow } from './onboarding-window'
 import { DateTime } from 'luxon'
 
@@ -312,6 +313,14 @@ export default class ConfigProvider extends ProviderContract {
       }
     }
 
+    // The open files are an open history that is capped in length. NOTE that
+    // configurations written by older versions contain an alphabetically sorted
+    // list whose true opening times cannot be recovered, so we simply keep the
+    // existing order and cut off whatever exceeds the limit.
+    if (this.config.app.openFiles.length > OPEN_HISTORY_LIMIT) {
+      this.config.app.openFiles = this.config.app.openFiles.slice(0, OPEN_HISTORY_LIMIT)
+    }
+
     // Now sort the paths.
     this.sortPaths()
 
@@ -370,16 +379,13 @@ export default class ConfigProvider extends ProviderContract {
     * @return {ZettlrConfig} Chainability.
     */
   private sortPaths (): void {
-    const { openFiles, openWorkspaces } = this.config.app
+    const { openWorkspaces } = this.config.app
     const { sortWorkspacesManually } = this.config.fileManager
 
-    // We only want to sort the paths based on rudimentary, natural order.
+    // We only want to sort the paths based on rudimentary, natural order. NOTE
+    // that the open files are explicitly not sorted: they form an open history
+    // whose order (most recently opened first) is its entire point.
     const coll = new Intl.Collator([ this.get('appLang'), 'en' ], { numeric: true })
-
-    openFiles.sort((a, b) => {
-      return coll.compare(path.basename(a), path.basename(b))
-    })
-    this.config.app.openFiles = openFiles
 
     // Only sort the workspaces if the user did not override the order manually.
     if (!sortWorkspacesManually) {
@@ -393,27 +399,56 @@ export default class ConfigProvider extends ProviderContract {
   }
 
   /**
+    * Records that a file has just been opened, moving it to the front of the
+    * open history. This is the single entry point for maintaining the open
+    * history; files already contained in the history are promoted rather than
+    * rejected.
+    *
+    * @param {string} absolutePath The absolute path of the opened file
+    */
+  recordOpenedFile (absolutePath: string): void {
+    const validFile = isFile(absolutePath) && hasMdOrCodeExt(absolutePath)
+
+    if (!validFile || ignorePath(absolutePath)) {
+      return
+    }
+
+    this.config.app.openFiles = updateOpenHistory(this.config.app.openFiles, absolutePath)
+
+    this.consolidateRootPaths()
+    this._container.set(this.config)
+    this._emitter.emit('update', 'openPaths')
+    broadcastIpcMessage('config-provider', { command: 'update', payload: 'openPaths' })
+  }
+
+  /**
     * Adds a path to be opened on startup
     * @param {String} p The path to be added
     * @return {Boolean} True, if the path was successfully added, else false.
     */
   addPath (p: string): boolean {
-    const { openFiles, openWorkspaces } = this.config.app
+    const validFile = isFile(p) && hasMdOrCodeExt(p)
+
+    if (validFile) {
+      // Files are maintained as an open history, so delegate to the single
+      // entry point for that. NOTE that, in contrast to the workspaces below,
+      // a file that is already known is not rejected but simply promoted.
+      if (ignorePath(p)) {
+        return false
+      }
+
+      this.recordOpenedFile(p)
+      return true
+    }
+
+    const { openWorkspaces } = this.config.app
     // Only add valid and unique paths
-    if (openFiles.includes(p) || openWorkspaces.includes(p)) {
+    if (openWorkspaces.includes(p)) {
       return false
     }
 
-    const validFile = isFile(p) && hasMdOrCodeExt(p)
-    const validDir = isDir(p)
-
-    if (!ignorePath(p) && (validFile || validDir)) {
-
-      if (validFile) {
-        this.config.app.openFiles.push(p)
-      } else {
-        this.config.app.openWorkspaces.push(p)
-      }
+    if (!ignorePath(p) && isDir(p)) {
+      this.config.app.openWorkspaces.push(p)
 
       this.consolidateRootPaths()
       this.sortPaths()

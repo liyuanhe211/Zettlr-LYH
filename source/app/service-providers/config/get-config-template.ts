@@ -340,7 +340,7 @@ export function getConfigTemplate (): ConfigOptions {
     fileManagerMode: 'combined', // thin = Preview or directories visible --- expanded = both visible --- combined = tree view displays also files
     fileManagerShowFiles: true, // Allow users to persistently collapse or uncollapse the files and workspaces sections.
     fileManagerShowWorkspaces: true,
-    fileNameDisplay: 'title+heading', // Controls what info is displayed as filenames
+    fileNameDisplay: 'filename', // Controls what info is displayed as filenames
     fileManager: {
       twoStepCollapseWorkspaces: false,
       sortWorkspacesManually: false // By default, let Zettlr sort workspaces
@@ -373,7 +373,7 @@ export function getConfigTemplate (): ConfigOptions {
     },
     // Editor related stuff
     editor: {
-      autoSave: 'off',
+      autoSave: 'delayed',
       autocompleteSuggestEmojis: true,
       snippetAutocompleteTriggerCharacter: ':',
       autocompleteWithEnter: false,
