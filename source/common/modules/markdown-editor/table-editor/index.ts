@@ -14,7 +14,8 @@
 import { type DecorationSet, EditorView } from '@codemirror/view'
 import { type EditorState, StateField } from '@codemirror/state'
 import { subviewUpdatePlugin } from './subview'
-import { TableWidget } from './widget'
+import { LOCKED_WIDTHS_ATTRIBUTE, TableWidget } from './widget'
+import { TABLE_WIDGET_WRAPPER_CLASS } from './widget-dom'
 
 // TODO: Think of an appropriate place for this. Or do we want to keep this
 // confined to this plugin?
@@ -73,6 +74,29 @@ export const renderTables = [
     },
     provide: f => EditorView.decorations.from(f)
   }),
+  // While a table cell is being edited (and hence the table's column widths
+  // are locked; see widget.ts), suppress any programmatic request to scroll a
+  // position inside that table into view. Every keystroke within a cell's
+  // subview forwards a transaction carrying a scroll request to the main view;
+  // without this lock, those requests move the scroll position around while
+  // the user is typing (see #5940). Scroll requests targeting positions
+  // outside of a locked table (e.g., when the user clicks elsewhere or tabs
+  // into a not-yet-editing table) are unaffected.
+  EditorView.scrollHandler.of((view, range, _options) => {
+    const lockedTables = [...view.dom.querySelectorAll<HTMLTableElement>(
+      `.${TABLE_WIDGET_WRAPPER_CLASS} table[${LOCKED_WIDTHS_ATTRIBUTE}="true"]`
+    )]
+
+    for (const lockedTable of lockedTables) {
+      const from = parseInt(lockedTable.dataset.tableFrom ?? '', 10)
+      const to = parseInt(lockedTable.dataset.tableTo ?? '', 10)
+      if (!Number.isNaN(from) && !Number.isNaN(to) && range.head >= from && range.head <= to) {
+        return true // Report the request as handled: The scroll position stays
+      }
+    }
+
+    return false
+  }),
   // A theme for the various elements
   EditorView.baseTheme({
     'div.cm-table-editor-widget-wrapper': {
@@ -117,6 +141,10 @@ export const renderTables = [
           padding: '4px 6px',
           '&.editing': {
             paddingLeft: '0px'
+          },
+          // Task checkboxes inside cells (see cell-tasks.ts)
+          '& input.cm-table-cell-task': {
+            cursor: 'pointer'
           }
         },
         // Grab handle styles
