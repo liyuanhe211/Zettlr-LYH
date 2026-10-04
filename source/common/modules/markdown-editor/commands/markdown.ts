@@ -19,6 +19,7 @@ import { indentUnit, language, syntaxTree } from '@codemirror/language'
 import { formatPandocAttributes, type ParsedPandocAttributes } from 'source/common/pandoc-util/parse-pandoc-attributes'
 import { indentMore } from '@codemirror/commands'
 import { nodeInSelection } from '../util/node-in-selection'
+import { buildPandocColumns } from 'source/common/pandoc-util/pandoc-columns'
 
 /**
  * Helper function that checks whether the provided target EditorView uses a
@@ -613,6 +614,34 @@ export function applyPandocDivOrSpan (target: EditorView, type: 'div'|'span', at
   }
 
   return false
+}
+
+/**
+ * Wraps the main selection in a pandoc two-column layout (`:::: {.columns}`).
+ * The selection is expanded to whole lines; the splitting rules themselves are
+ * in `buildPandocColumns`, which is where they are tested.
+ *
+ * @param   {EditorView}  target  The target view
+ *
+ * @return  {boolean}             Whether the command was applicable
+ */
+export function applyPandocColumns (target: EditorView): boolean {
+  if (!viewContainsMarkdown(target)) {
+    return false
+  }
+
+  const { state } = target
+  const range = state.selection.main
+  const firstLine = state.doc.lineAt(range.from)
+  const lastLine = state.doc.lineAt(range.to)
+  const { text, cursorOffset } = buildPandocColumns(state.sliceDoc(firstLine.from, lastLine.to))
+
+  target.dispatch({
+    changes: { from: firstLine.from, to: lastLine.to, insert: text },
+    selection: { anchor: firstLine.from + cursorOffset }
+  })
+  target.focus()
+  return true
 }
 
 /**
