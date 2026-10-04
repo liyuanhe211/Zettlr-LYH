@@ -68,6 +68,42 @@ export interface Point {
 
 const ipcRenderer = window.ipc
 
+// Timing of the click feedback on menu items: The clicked item blinks once
+// (highlight off, then on again) before the menu closes and the action runs,
+// mimicking the behavior of native Windows/macOS menus.
+const MENU_BLINK_STEP = 50 // ms per blink phase
+const MENU_CLOSE_DELAY = MENU_BLINK_STEP * 3 // close after the blink finished
+
+/**
+ * Closes all open popup menus with native-like click feedback: The clicked
+ * item blinks once while every menu is frozen against further input; only
+ * afterwards the menus are removed and the action is invoked.
+ *
+ * @param  {HTMLElement}  menuItem  The clicked menu item element
+ * @param  {() => void}   invoke    Runs the item's action after the menus closed
+ */
+function closeWithClickFeedback (menuItem: HTMLElement, invoke: () => void): void {
+  // Freeze every open menu (including parent menus of a submenu) so that no
+  // second click or hover change can interfere during the feedback animation.
+  const menus = document.querySelectorAll('.application-menu')
+  for (const menu of menus) {
+    menu.classList.add('frozen')
+  }
+
+  // Blink: highlighted -> off -> highlighted -> close. The "frozen" class
+  // disables pointer events, which also drops the :hover highlight, so the
+  // highlight during the blink is controlled via the active-flash class.
+  menuItem.classList.add('active-flash')
+  setTimeout(() => { menuItem.classList.remove('active-flash') }, MENU_BLINK_STEP)
+  setTimeout(() => { menuItem.classList.add('active-flash') }, MENU_BLINK_STEP * 2)
+  setTimeout(() => {
+    for (const menu of document.querySelectorAll('.application-menu')) {
+      menu.parentElement?.removeChild(menu)
+    }
+    invoke()
+  }, MENU_CLOSE_DELAY)
+}
+
 /**
  * Recursively removes any actions found in the provided menu item.
  *
@@ -229,14 +265,15 @@ export default function showPopupMenu (position: Point|Rect, items: AnyMenuItem[
       menuItem.addEventListener('mousedown', (event) => {
         event.preventDefault()
         event.stopPropagation()
-        if (item.action !== undefined) {
-          item.action()
-        } else if (item.id !== undefined && callback !== undefined) {
-          callback(item.id)
-        } else {
-          console.warn(`Registered click on menu item "${item.label}", but it had neither an action, nor an ID attached to it.`)
-        }
-        appMenu.parentElement?.removeChild(appMenu) // Close the menu
+        closeWithClickFeedback(menuItem, () => {
+          if (item.action !== undefined) {
+            item.action()
+          } else if (item.id !== undefined && callback !== undefined) {
+            callback(item.id)
+          } else {
+            console.warn(`Registered click on menu item "${item.label}", but it had neither an action, nor an ID attached to it.`)
+          }
+        })
       })
     } else if (item.type === 'submenu' && item.enabled !== false) {
       // Enable displaying the sub menu
