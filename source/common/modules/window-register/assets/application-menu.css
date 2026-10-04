@@ -23,7 +23,14 @@ body {
     font-size: 14px;
     box-shadow: 5px 5px 15px 0px rgba(0, 0, 0, .3);
     min-width: 150px;
-  
+
+    /* While the click feedback (blink) of a clicked item is running, no menu
+     * may react to further input. This also drops :hover highlights, so the
+     * blinking highlight is controlled via the active-flash class below. */
+    &.frozen {
+      pointer-events: none;
+    }
+
     div.menu-item {
       height: 25px;
       line-height: 25px;
@@ -35,7 +42,8 @@ body {
       grid-template-rows: 100%;
       grid-template-areas: "status label after";
 
-      &:not(.separator):not(.disabled):hover {
+      &:not(.separator):not(.disabled):hover,
+      &:not(.separator):not(.disabled).active-flash {
         background-color: rgb(200, 200, 200);
       }
 
@@ -78,7 +86,8 @@ body {
         /* Separators are obviously very small */
         &.separator { background-color: #666; }
     
-        &:not(.separator):not(.disabled):hover { background-color: #999; }
+        &:not(.separator):not(.disabled):hover,
+        &:not(.separator):not(.disabled).active-flash { background-color: #999; }
       }
     }    
   }
