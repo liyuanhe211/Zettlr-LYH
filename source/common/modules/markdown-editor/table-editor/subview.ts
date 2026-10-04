@@ -18,7 +18,7 @@
 
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { EditorState, MapMode, StateField, EditorSelection, type ChangeSpec, type Range } from '@codemirror/state'
-import { EditorView, drawSelection, type DecorationSet, Decoration, ViewPlugin, type ViewUpdate } from '@codemirror/view'
+import { EditorView, drawSelection, type DecorationSet, Decoration, ViewPlugin, type ViewUpdate, WidgetType } from '@codemirror/view'
 import markdownParser from '../parser/markdown-parser'
 import { tableEditorKeymap } from '../keymaps/table-editor'
 import { dispatchFromSubview, maybeDispatchToSubview, syncAnnotation } from './util/data-exchange'
@@ -27,6 +27,7 @@ import { getMainEditorThemes } from '../editor-extension-sets'
 import { darkMode, useDarkModeEditor } from '../theme/dark-mode'
 import { markdownSyntaxHighlighter } from '../theme/syntax'
 import { clickListeners } from '../plugins/click-listeners'
+import { lineBreakEndPositions } from './cell-navigation'
 
 /**
  * A transaction filter that ensures that any changes made to the view that
@@ -202,6 +203,54 @@ function createHiddenDecorations (state: EditorState, cellRange: { from: number,
 }
 
 /**
+ * Breaks the line after a `<br>` tag in the cell's source. The tag itself
+ * stays visible, since the subview shows the cell's Markdown source.
+ */
+class CellLineBreakWidget extends WidgetType {
+  eq (_other: CellLineBreakWidget): boolean {
+    return true
+  }
+
+  toDOM (_view: EditorView): HTMLElement {
+    const element = document.createElement('span')
+    element.className = 'cm-table-cell-line-break'
+    element.appendChild(document.createElement('br'))
+    return element
+  }
+}
+
+// NOTE: The negative side draws the break before a cursor right after the tag,
+// so that this cursor shows at the start of the following line.
+const cellLineBreakDeco = Decoration.widget({ widget: new CellLineBreakWidget(), side: -1 })
+
+function createLineBreakDecorations (state: EditorState): DecorationSet {
+  const [ cellFrom, cellTo ] = state.field(hiddenSpanField).cellRange
+  const positions = lineBreakEndPositions(state.sliceDoc(cellFrom, cellTo), cellFrom)
+  return Decoration.set(positions.map(position => cellLineBreakDeco.range(position)))
+}
+
+/**
+ * Shows the line breaks (`<br>`) of the cell's source as actual line breaks,
+ * so that the cell keeps its lines while being edited, and the arrow keys can
+ * move between them.
+ */
+const cellLineBreakPlugin = ViewPlugin.fromClass(class {
+  decorations: DecorationSet
+
+  constructor (view: EditorView) {
+    this.decorations = createLineBreakDecorations(view.state)
+  }
+
+  update (update: ViewUpdate): void {
+    if (update.docChanged) {
+      this.decorations = createLineBreakDecorations(update.state)
+    }
+  }
+}, {
+  decorations: plugin => plugin.decorations
+})
+
+/**
 * Creates and mounts a sub-EditorView within the provided targetCell.
 *
 * @param  {EditorView}      mainView        The main view
@@ -248,6 +297,7 @@ export function createSubviewForCell (
         }
       }),
       ensureBoundariesFilter,
+      cellLineBreakPlugin,
       EditorView.domEventHandlers(clickListeners())
     ]
   })
