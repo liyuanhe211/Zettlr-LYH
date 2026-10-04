@@ -14,9 +14,10 @@
 
 import { renderInlineWidgets } from './base-renderer'
 import { type SyntaxNode, type SyntaxNodeRef } from '@lezer/common'
-import { EditorView, WidgetType } from '@codemirror/view'
+import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import { type EditorState } from '@codemirror/state'
 import { configField } from '../util/configuration'
+import { findImageOnlyLines, isRenderableImageNode } from '../util/image-only-lines'
 import makeValidUri from '@common/util/make-valid-uri'
 import { linkImageMenu } from '../context-menu/link-image-menu'
 import { trans } from '@common/i18n-renderer'
@@ -53,7 +54,7 @@ const IMAGE_HEIGHT_CACHE = new Map<string, number>()
  *
  * @return  {string}            The full, absolute path to the image.
  */
-function resolveImageUrl (filePath: string, imageUrl: string): string {
+export function resolveImageUrl (filePath: string, imageUrl: string): string {
   const basePath = pathDirname(filePath)
   return isDataUrl(imageUrl) ? imageUrl : makeValidUri(imageUrl, basePath)
 }
@@ -121,8 +122,12 @@ class ImageWidget extends WidgetType {
     figure.addEventListener('contextmenu', (event) => {
       event.preventDefault()
       event.stopPropagation()
-      const node = syntaxTree(view.state).resolve(parseInt(img.dataset.from ?? '-1', 10), 1)
-      linkImageMenu(view, node, { x: event.clientX, y: event.clientY })
+      const imageFrom = parseInt(img.dataset.from ?? '-1', 10)
+      const node = syntaxTree(view.state).resolve(imageFrom, 1)
+      // The Pandoc attribute section addresses the image: a cursor just
+      // inside it (after the exclamation mark)
+      const insideImage = Math.min(imageFrom + 1, view.state.doc.length)
+      linkImageMenu(view, node, { x: event.clientX, y: event.clientY }, { from: insideImage, to: insideImage })
     })
 
     //////////////////////////////////////////
@@ -309,22 +314,15 @@ function shouldHandleNode (node: SyntaxNodeRef): boolean {
 }
 
 function createWidget (state: EditorState, node: SyntaxNodeRef): ImageWidget|undefined {
+  if (!isRenderableImageNode(state, node)) {
+    return undefined
+  }
+
   // Get the actual link contents, extract title and URL and create a
   // replacement widget
   const marks = node.node.getChildren('LinkMark')
   const titleNode = node.node.getChild('LinkTitle')
-  const urlNode = node.node.getChild('URL')
-
-  if (urlNode === null || marks.length < 2) {
-    return undefined
-  }
-
-  // Images (particularly captions) can include newlines and still be valid.
-  // However, the current implementation as an inline-plugin does not allow for
-  // that, and attempting to render such an image would crash the editor.
-  if (state.sliceDoc(node.from, node.to).includes('\n')) {
-    return undefined
-  }
+  const urlNode = node.node.getChild('URL')!
 
   const alt = state.sliceDoc(marks[0].to, marks[1].from)
   const title = titleNode === null ? alt : state.sliceDoc(titleNode.from, titleNode.to)
@@ -345,8 +343,41 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): ImageWidget|und
   return new ImageWidget(node.node, title, url, resolvedImageSrc, alt, data)
 }
 
+const imageOnlyLineDecoration = Decoration.line({ class: 'cm-image-only-line' })
+
+/**
+ * Marks the visible lines that hold nothing but rendered images.
+ *
+ * @param   {EditorView}     view  The editor view
+ *
+ * @return  {DecorationSet}        The line decorations
+ */
+function decorateImageOnlyLines (view: EditorView): DecorationSet {
+  const includeAdjacent = view.state.field(configField, false)?.previewModeShowSyntaxWhenCursorIsAdjacent ?? true
+  const lineStarts = findImageOnlyLines(view.state, view.visibleRanges, includeAdjacent)
+  return Decoration.set(lineStarts.map(lineStart => imageOnlyLineDecoration.range(lineStart)))
+}
+
+const imageOnlyLines = ViewPlugin.fromClass(class {
+  decorations: DecorationSet
+
+  constructor (view: EditorView) {
+    this.decorations = decorateImageOnlyLines(view)
+  }
+
+  update (update: ViewUpdate): void {
+    if (update.docChanged || update.viewportChanged || update.selectionSet) {
+      this.decorations = decorateImageOnlyLines(update.view)
+    }
+  }
+}, {
+  decorations: plugin => plugin.decorations
+})
+
 export const renderImages = [
   EditorView.baseTheme({
+    // Must be !important: the justification rule in MainEditor.vue is more specific
+    '.cm-line.cm-image-only-line': { textAlign: 'center !important' },
     'figure.image-preview': {
       position: 'relative',
       display: 'inline-block',
@@ -401,5 +432,6 @@ export const renderImages = [
       }
     }
   }),
-  renderInlineWidgets(shouldHandleNode, createWidget)
+  renderInlineWidgets(shouldHandleNode, createWidget),
+  imageOnlyLines
 ]
