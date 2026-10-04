@@ -21,6 +21,7 @@ import { linkImageMenu } from '../context-menu/link-image-menu'
 import { nodeAtPos } from '../util/node-in-selection'
 import { NODES } from '../parser/citation-parser'
 import { citationMenu } from '../context-menu/citation-menu'
+import { pandocRangeForClick } from '../context-menu/pandoc-attribute-menu'
 
 export const defaultContextMenu = EditorView.domEventHandlers({
   contextmenu (event, view) {
@@ -34,10 +35,14 @@ export const defaultContextMenu = EditorView.domEventHandlers({
 
     const tree = syntaxTree(view.state)
 
+    // The objects addressed by the Pandoc attribute section; determined before
+    // the menus below select the word or misspelling under the cursor.
+    const pandocRange = pandocRangeForClick(view.state, pos)
+
     const maybeLinkNode = nodeAtPos(pos, tree, [ 'URL', 'Link', 'Image', 'LinkReference' ])
     if (maybeLinkNode !== null) {
       // We can show a Link/Image context menu!
-      linkImageMenu(view, maybeLinkNode, coords)
+      linkImageMenu(view, maybeLinkNode, coords, pandocRange)
       return true
     }
 
@@ -45,7 +50,7 @@ export const defaultContextMenu = EditorView.domEventHandlers({
 
     if (citationNode !== null) {
       // We can show a citation menu
-      citationMenu(view, coords, citationNode)
+      citationMenu(view, coords, citationNode, pandocRange)
       return true
     }
 
@@ -57,7 +62,7 @@ export const defaultContextMenu = EditorView.domEventHandlers({
     }
 
     const node = tree.resolveInner(pos)
-    defaultMenu(view, node, coords).catch(err => console.error(err))
+    defaultMenu(view, node, coords, pandocRange).catch(err => console.error(err))
     return true
   }
 })
