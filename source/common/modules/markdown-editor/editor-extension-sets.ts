@@ -18,17 +18,20 @@
 
 import { closeBrackets } from '@codemirror/autocomplete'
 import { type Update } from '@codemirror/collab'
-import { history } from '@codemirror/commands'
-import { bracketMatching, codeFolding, foldGutter, indentOnInput, indentUnit, StreamLanguage } from '@codemirror/language'
+import { defaultKeymap, history } from '@codemirror/commands'
+import { bracketMatching, codeFolding, foldGutter, foldKeymap, indentOnInput, indentUnit, StreamLanguage } from '@codemirror/language'
 import { stex } from '@codemirror/legacy-modes/mode/stex'
 import { yaml } from '@codemirror/lang-yaml'
-import { search } from '@codemirror/search'
+import { search, searchKeymap } from '@codemirror/search'
 import { Compartment, EditorState, Prec, type Extension } from '@codemirror/state'
 import {
   drawSelection,
   EditorView,
+  keymap,
   lineNumbers,
   dropCursor,
+  rectangularSelection,
+  crosshairCursor,
   type ViewUpdate,
   type DOMEventHandlers
 } from '@codemirror/view'
@@ -38,7 +41,7 @@ import markdownParser from './parser/markdown-parser'
 import { defaultContextMenu } from './plugins/default-context-menu'
 import { readabilityMode } from './plugins/readability'
 import { hookDocumentAuthority } from './plugins/remote-doc'
-import { lintGutter, linter } from '@codemirror/lint'
+import { lintGutter, linter, type Diagnostic } from '@codemirror/lint'
 import { spellcheck } from './linters/spellcheck'
 import { mdLint } from './linters/md-lint'
 import { countField, countPlugin } from './plugins/statistics-fields'
@@ -73,9 +76,11 @@ import { tagClasses } from './plugins/tag-classes'
 import { autocompleteTriggerCharacter } from './autocomplete/snippets'
 import { vimPlugin } from './plugins/vim-mode'
 import { projectInfoField } from './plugins/project-info-field'
+import { preserveScrollAnchor } from './plugins/preserve-scroll-anchor'
 import { headingGutter } from './renderers/render-headings'
 import { citationTooltips } from './tooltips/citations'
 import { zettlrKeymap } from './keymaps'
+import { pptxPreviewPins } from './plugins/pptx-preview-pins'
 
 /**
  * This interface describes the required properties which the extension sets
@@ -183,6 +188,13 @@ function getCoreExtensions (options: CoreExtensionOptions): Extension[] {
     highlightWhitespace(options.initialConfig.highlightWhitespace),
     dropCursor(),
     EditorState.allowMultipleSelections.of(true),
+    // Column (rectangular) selection with Alt+drag, as known from Notepad++
+    // and VS Code. Creates one cursor/selection per line so that all of them
+    // can be edited simultaneously.
+    rectangularSelection(),
+    // While Alt is held down, show a crosshair cursor to indicate that
+    // dragging will create a rectangular selection.
+    crosshairCursor(),
     // Ensure the cursor never completely sticks to the top or bottom of the editor
     // EditorView.scrollMargins.of(_view => { return { top: 30, bottom: 30 } }),
     search({ top: true }), // Add a search
@@ -213,6 +225,9 @@ function getCoreExtensions (options: CoreExtensionOptions): Extension[] {
       options.remoteConfig.pullUpdates,
       options.remoteConfig.pushUpdates
     ),
+    // Keep the viewport visually stable when the display height changes
+    // without the user scrolling (remote edits, widgets (re)rendering, ...)
+    preserveScrollAnchor,
     highlightRanges
   ]
 }
@@ -317,6 +332,7 @@ export function getMarkdownExtensions (options: CoreExtensionOptions): Extension
     showLineNumbers(options.initialConfig.showMarkdownLineNumbers),
     mdLinterExtensions,
     headingGutter,
+    pptxPreviewPins, // Heading pins for the pandoc PPTX preview (hidden unless it is open)
     languageTool,
     // Some statistics we need for Markdown documents
     countPlugin,
@@ -389,5 +405,105 @@ export function getJSONExtensions (options: CoreExtensionOptions): Extension[] {
     ...getGenericCodeExtensions(options),
     json(),
     linter(jsonParseLinter())
+  ]
+}
+
+/**
+ * A linter for JSON Lines documents: Every non-empty line must be a JSON value
+ * of its own. (The default JSON linter would flag everything after the first
+ * line as an error.)
+ *
+ * @param   {EditorView}    view  The editor view
+ *
+ * @return  {Diagnostic[]}        One error diagnostic per malformed line
+ */
+function jsonLinesParseLinter (view: EditorView): Diagnostic[] {
+  const diagnostics: Diagnostic[] = []
+  const doc = view.state.doc
+
+  for (let lineNumber = 1; lineNumber <= doc.lines; lineNumber++) {
+    const line = doc.line(lineNumber)
+    if (line.text.trim() === '') {
+      continue
+    }
+
+    try {
+      JSON.parse(line.text)
+    } catch (error) {
+      diagnostics.push({
+        from: line.from,
+        to: line.to,
+        severity: 'error',
+        message: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  return diagnostics
+}
+
+/**
+ * This public function returns a set of extensions required to display JSON
+ * Lines documents in Zettlr editors. These include the generic code extensions,
+ * the JSON syntax highlighter, and a linter that checks each line separately.
+ *
+ * @param   {CoreExtensionOptions}  options  The default options
+ *
+ * @return  {Extension[]}                    An array of options for JSON Lines files
+ */
+export function getJSONLExtensions (options: CoreExtensionOptions): Extension[] {
+  return [
+    ...getGenericCodeExtensions(options),
+    json(),
+    linter(jsonLinesParseLinter)
+  ]
+}
+
+/**
+ * This public function returns a set of extensions to display generated,
+ * read-only Markdown, such as the formatted JSON viewer. The document is not
+ * connected to the document authority, and all renderers that could modify the
+ * document or that need the context of a Markdown file on disk (tables, tasks,
+ * images, iframes, citations) are turned off.
+ *
+ * @param   {EditorConfiguration}           config          The editor configuration
+ * @param   {(update: ViewUpdate) => void}  updateListener  Notified on every update
+ *
+ * @return  {Extension[]}                                   An array of extensions
+ */
+export function getReadOnlyMarkdownExtensions (config: EditorConfiguration, updateListener: (update: ViewUpdate) => void): Extension[] {
+  const viewerConfig: EditorConfiguration = {
+    ...structuredClone(config),
+    renderingMode: 'preview',
+    renderTables: false,
+    renderTasks: false,
+    renderImages: false,
+    renderIframes: false,
+    renderCitations: false
+  }
+
+  const themes = getMainEditorThemes()
+
+  return [
+    EditorState.readOnly.of(true),
+    keymap.of([ ...defaultKeymap, ...searchKeymap, ...foldKeymap ]),
+    darkMode({ darkMode: useDarkModeEditor(viewerConfig.darkMode, viewerConfig.darkModeEditor), ...themes[viewerConfig.theme] }),
+    codeFolding(),
+    Prec.low(foldGutter()),
+    drawSelection({ drawRangeCursor: false, cursorBlinkRate: 1200 }),
+    search({ top: true }),
+    EditorView.lineWrapping,
+    configField.init(_state => viewerConfig),
+    EditorView.updateListener.of(updateListener),
+    markdownParser({
+      zknLinkParserConfig: { format: viewerConfig.zknLinkFormat }
+    }),
+    markdownSyntaxHighlighter(),
+    renderers(viewerConfig),
+    tocField,
+    markdownFolding,
+    backgroundLayers,
+    softwrapVisualIndent,
+    preserveScrollAnchor
   ]
 }

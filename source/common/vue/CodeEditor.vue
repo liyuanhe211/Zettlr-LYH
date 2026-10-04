@@ -23,7 +23,7 @@
 
 // import { trans } from '@common/i18n-renderer'
 
-import { drawSelection, dropCursor, EditorView, lineNumbers } from '@codemirror/view'
+import { drawSelection, dropCursor, EditorView, lineNumbers, rectangularSelection, crosshairCursor } from '@codemirror/view'
 import { onMounted, ref, toRef, watch } from 'vue'
 import { autocompletion, closeBrackets } from '@codemirror/autocomplete'
 import { bracketMatching, codeFolding, foldGutter, indentOnInput, indentUnit, StreamLanguage } from '@codemirror/language'
@@ -89,6 +89,10 @@ function getExtensions (mode: SupportedLanguage): Extension[] {
     dropCursor(),
     statusbar,
     EditorState.allowMultipleSelections.of(true),
+    // Column (rectangular) selection with Alt+drag, incl. crosshair cursor
+    // while Alt is held down (mirrors the main editor's behavior)
+    rectangularSelection(),
+    crosshairCursor(),
     EditorState.tabSize.of(numSpaces),
     indentUnit.of(useTabs ? '\t' : ' '.repeat(numSpaces)),
     // Ensure the cursor never completely sticks to the top or bottom of the editor
