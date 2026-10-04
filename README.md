@@ -6,8 +6,9 @@
   Zettlr [<em>ˈset·lər</em>]
 </h1>
 
-<p align="center"><strong>Your One-Stop Publication Workbench</strong>.</p>
+<p align="center"><strong>Your one-stop publication workbench.</strong></p>
 
+<p align="center"><strong>Zettlr-LYH</strong> is a personal branch of Zettlr. Everything it adds or changes is described in the <a href="Manual_User.md">Zettlr-LYH User Manual</a>.</p>
 <p align="center">
   <a href="https://doi.org/10.5281/zenodo.2580173">
     <img src="https://zenodo.org/badge/DOI/10.5281/zenodo.2580173.svg" alt="DOI">
