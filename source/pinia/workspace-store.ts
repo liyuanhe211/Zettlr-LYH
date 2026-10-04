@@ -121,8 +121,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           const root = [...workspaceMap.value.keys()].find(p => payload.path.startsWith(p))
           if (root !== undefined) {
             const arr = workspaceMap.value.get(root)!
-            arr.splice(arr.indexOf(payload.path), 1)
-            workspaceMap.value.set(root, arr)
+            const idx = arr.indexOf(payload.path)
+            // NOTE: The watchdog also reports paths that are filtered out of
+            // the workspace listing (e.g., dotfiles); splicing with idx === -1
+            // would remove the *last* element of the array and thereby drop an
+            // unrelated file's descriptor.
+            if (idx > -1) {
+              arr.splice(idx, 1)
+              workspaceMap.value.set(root, arr)
+            }
           }
 
           descriptorMap.value.delete(payload.path)
@@ -130,8 +137,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           const root = [...workspaceMap.value.keys()].find(p => payload.descriptor.path.startsWith(p))
           if (root !== undefined && payload.event !== 'change') {
             const arr = workspaceMap.value.get(root)!
-            arr.push(payload.descriptor.path)
-            workspaceMap.value.set(root, arr)
+            if (!arr.includes(payload.descriptor.path)) {
+              arr.push(payload.descriptor.path)
+              workspaceMap.value.set(root, arr)
+            }
           }
 
           descriptorMap.value.set(payload.descriptor.path, payload.descriptor)
