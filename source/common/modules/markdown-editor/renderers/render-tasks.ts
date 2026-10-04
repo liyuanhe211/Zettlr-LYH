@@ -35,7 +35,9 @@ class TaskWidget extends WidgetType {
     elem.addEventListener('click', (event) => {
       const insert = this.isChecked ? '[ ]' : '[x]'
       view.dispatch({ changes: [{ from: this.node.from, to: this.node.to, insert }] })
-      view.contentDOM.focus()
+      // view.focus() focuses with preventScroll; a bare contentDOM.focus()
+      // makes the browser scroll to the (possibly far away) cursor.
+      view.focus()
     })
     return elem
   }
