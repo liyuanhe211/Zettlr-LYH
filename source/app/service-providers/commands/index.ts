@@ -24,6 +24,7 @@ import DirSettings from './dir-settings'
 import DirSort from './dir-sort'
 import Export from './export'
 import ExportFormulaCalculated from './export-formula-calculated'
+import ExportHTML from './export-html'
 import FetchLinkPreview from './fetch-link-preview'
 import FileDelete from './file-delete'
 import FileDuplicate from './file-duplicate'
@@ -38,6 +39,8 @@ import IncreasePomodoro from './increase-pomodoro'
 import LanguageTool from './language-tool'
 import OpenAttachment from './open-attachment'
 import OpenAuxWindow from './open-aux-window'
+import PptxExport from './pptx-export'
+import PptxPreview from './pptx-preview'
 import Print from './print'
 import RequestMove from './request-move'
 import RootClose from './root-close'
@@ -67,6 +70,7 @@ export const commands = [
   DirSort,
   Export,
   ExportFormulaCalculated,
+  ExportHTML,
   FetchLinkPreview,
   FileDelete,
   FileDuplicate,
@@ -81,6 +85,8 @@ export const commands = [
   LanguageTool,
   OpenAttachment,
   OpenAuxWindow,
+  PptxExport,
+  PptxPreview,
   Print,
   RenameTag,
   RequestMove,
