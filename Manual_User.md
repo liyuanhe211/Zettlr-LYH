@@ -1,6 +1,6 @@
 # Zettlr-LYH User Manual
 
-Zettlr-LYH is a personal branch of the open-source Markdown editor Zettlr. It keeps every Zettlr feature and adds its own: a Files section organized as an opening-history tree, a live Pandoc PPTX slide preview with export, attribute editing for Pandoc slides, a standalone Export to HTML, calculation of bracketed physical-quantity formulas, a JSON and JSON Lines viewer, a cache of unsaved changes that survives restarts, in-place rendering of HTML, and various editing and display adjustments. This manual covers only what differs from Zettlr; everything else behaves as in Zettlr and is documented at https://docs.zettlr.com.
+Zettlr-LYH is a personal branch of the open-source Markdown editor Zettlr. It keeps every Zettlr feature and adds its own: a Files section organized as an opening-history tree, a live Pandoc PPTX slide preview with export, attribute editing for Pandoc slides, a standalone Export to HTML, calculation of bracketed physical-quantity formulas, a JSON and JSON Lines viewer, a cache of unsaved changes that survives restarts, in-place rendering of HTML, images that can be selected and resized by dragging, and various editing and display adjustments. This manual covers only what differs from Zettlr; everything else behaves as in Zettlr and is documented at https://docs.zettlr.com.
 
 ## Installation and running
 
@@ -42,7 +42,7 @@ The Pandoc PPTX preview and Export to PPTX need the following on the same comput
 - Desktop Microsoft PowerPoint for Windows. The preview drives an invisible PowerPoint instance to render slide images and measure text overflow.
 - Anaconda Python 3.13, installed at the fixed location the program expects, with the `pywin32` and `python-pptx` packages.
 - pandoc.
-- The external conversion script `%USERPROFILE%\.claude\skills\PPT-Maker-NotesInTheScales-Pandoc\scripts\Convert_Markdown_Deck.py` together with the Markdown-to-PPTX renderer it uses.
+- The external conversion script `%USERPROFILE%\.claude\skills\PPT-Maker-NotesInTheScales-Pandoc-LYH\scripts\Convert_Markdown_Deck.py` together with the Markdown-to-PPTX renderer it uses.
 - The default PowerPoint template (`.potx`) at the fixed location that the conversion script also uses. A document may name a different template; see "Choosing a template" below.
 
 ## Opening files from Windows Explorer
@@ -105,8 +105,11 @@ The tab menu also works for files that do not belong to any open workspace.
 
 ### Scrolling the tab bar
 
-When there are more tabs than fit into the tab bar, turning the mouse wheel over the tab bar scrolls the tabs sideways. Holding Ctrl (Cmd on macOS) while turning the wheel leaves the tab bar alone.
+When more tabs exist than the tab bar can show, turning the mouse wheel over the tab bar scrolls the tabs sideways. Holding Ctrl (Cmd on macOS) while turning the wheel leaves the tab bar alone.
 
+### Closing a tab with the middle mouse button
+
+Clicking a tab with the middle mouse button (pressing the mouse wheel) closes that tab when you release the button. The click does nothing else. It does not start the auto-scroll mode where moving the mouse scrolls the window until the next click, so the mouse works normally right after the tab closes.
 ## The file manager
 
 ### The opening-history tree in the Files section
@@ -138,6 +141,73 @@ Known limitations:
 
 In the editor, the lines of a Markdown document are justified so that both edges of a paragraph line up with the edges of the text column; the last line of a paragraph stays left-aligned. Code files are not justified. Export to HTML uses the same justification.
 
+### Image sizes in the editor
+
+In preview mode, with image rendering turned on (Preferences → "Render images"), a Markdown image such as `![Plot](figures/plot.png)` is shown in place of its source. Its size depends on the Pandoc attributes written directly after it, without a space, such as `![Plot](figures/plot.png){width=50%}`:
+
+- Without a width, the image is shown at its natural size in pixels. If the image is wider than the text column, it is scaled down to exactly the column width, keeping its proportions. Small images are not enlarged, and tall images are not limited in height.
+- With a width in percent, written as `{width=50%}` or `{w=50%}`, the image takes that share of the text column width. Small images are enlarged to reach it.
+- A width in another unit, such as `{width=300px}` or `{width=8cm}`, sets that width, but the image never becomes wider than the text column.
+- A height without a width, such as `{height=300px}` or `{h=300px}`, is a maximum. An image taller than that value is scaled down, keeping its proportions, and a smaller image keeps its natural size. A height in percent, such as `{height=50%}`, has no effect in the editor.
+- With both a width and a height, the image is shown at exactly those dimensions, so it may look stretched.
+- Widths and heights take effect only with one of the units `cm`, `mm`, `in`, `px`, `pt`, `pc`, `em`, `ex`, `ch`, `rem`, `vw`, `vh`, `vmin`, `vmax`, or `%`. A value without a unit, such as `{width=300}`, is ignored.
+
+The attributes directly after a rendered image are hidden, so the line shows only the image. They reappear as soon as the cursor or a selection touches the image or the attributes. Whether a cursor directly next to them counts as touching follows the setting for showing syntax when the cursor is adjacent. Attributes separated from the image by a space, as in `![a](a.png) {width=50%}`, and attributes that span several lines stay visible.
+
+While the mouse pointer is over an image, or while the image is selected (see "Selecting and resizing an image"), three overlays appear on it: a size label at the top left, the editable caption at the bottom, and a button at the top right that opens the image in another program. The size label shows the natural size of the image in pixels, followed by the width when one is written, for example `800×400 · 56%`. The overlays are hidden when the image is displayed smaller than 256 pixels wide or 128 pixels high.
+
+The settings under Preferences → Editor → "Image size" ("Restrict width to N %" and "Restrict height to N %") do not affect images in the editor. They only limit image sizes in files made with Export to HTML; see "Configuration reference".
+
+These rules apply to Markdown images outside tables. They do not apply to images in table cells (see "Images in table cells") or to inline HTML `<img>` elements, which follow their own `width` and `height` and are never wider than the editor (see "Rendering HTML in the editor").
+
+[Manual pending] A screenshot comparing an image at its natural size with a wider image scaled down to the text column width is missing. Producing it requires a running copy of the program, which this update could not start.
+
+### Selecting and resizing an image
+
+![A centered image selected in the editor after its width was changed by dragging: a blue outline, a white handle in the middle of the left and right edges, the size label "800×400 · 56%" at the top left, the open button at the top right, and the caption "Centered image" at the bottom](Manual_Images/editor-image-selected-resized.png)
+
+The image was clicked and its right handle dragged to the left. The label now reads `800×400 · 56%`: the natural size of the image is 800 × 400 pixels, and the image takes 56% of the text column width. Because the image stands on a line of its own, it shrank on both sides and stays centered.
+
+Click a rendered image to select it. The selected image gets an outline in the accent color, a resize handle appears in the middle of its left and right edges, and the overlays stay visible. The click does not show the image source and does not move the cursor, so the image stays rendered. Clicking another image selects that one instead.
+
+To change the width, drag one of the handles with the left mouse button:
+
+- Dragging the right handle to the right, or the left handle to the left, enlarges the image; dragging in the opposite direction shrinks it. A handle shows the tooltip "Drag to change the width".
+- The width is measured as a share of the text column, in whole percent from 5% to 100%.
+- An image on a line that contains only images is centered (see "Lines that contain only images are centered"), so it grows and shrinks on both sides at once. Any other image keeps its left edge in place.
+- While you drag, the image changes size and the size label shows the new width.
+- Pressing Esc during the drag cancels it. The image returns to its previous size, the document is not changed, and the image stays selected.
+
+When you release the mouse button, the new width is written into the attributes directly after the image, and the image stays selected:
+
+- An image without attributes receives `{width=NN%}`; for example, `![Plot](plot.png)` becomes `![Plot](plot.png){width=56%}`.
+- An existing `width` or `w` key is changed in place, keeping its spelling and quotation marks. Repeated width keys are reduced to one.
+- If the attributes contain no width, `width=NN%` is added to them.
+- A `height` or `h` key is removed so that the image keeps its proportions. All other attributes, the identifier, and the classes stay as they are. For example, `{#fig:a .big height=40%}` becomes `{#fig:a .big width=89%}`.
+- The change is a single editing step; Ctrl+Z (Cmd+Z on macOS) undoes it. Releasing the button without moving the handle, or at the same width, changes nothing.
+
+While an image is selected, the following actions are available:
+
+| Action | Effect |
+|---|---|
+| Double-click the image, or press Enter while it is selected | Selects the whole source of the image together with its attributes, showing the source for editing. |
+| Delete or Backspace | Deletes the image together with its attributes and places the cursor where the image was. Ctrl+Z (Cmd+Z on macOS) restores it. |
+| Esc | Ends the selection. |
+| Click anywhere else in the editor, or press any other key | Ends the selection; the click or key then works as usual. A typed key acts at the cursor, which is still where it was before you clicked the image. |
+| Press Shift, Ctrl, Alt, or Cmd on its own | Keeps the selection. |
+
+Any change to the document or to the cursor position also ends the selection.
+
+There is no setting of its own for this behavior. It is available whenever images are rendered, that is, in preview mode with "Render images" turned on.
+
+Known limitations:
+
+- Only Markdown images rendered in the editor can be selected and resized. Images in table cells and inline HTML `<img>` elements cannot.
+- Dragging always writes a percentage of the editor's text column. A width in another unit, such as `width=300px`, is replaced by the percentage.
+- In a slide document, the PPTX renderer measures a percentage width against the box that holds the image (see "Editing Pandoc attributes"), so the image can take a different share of the slide than of the editor's text column.
+- When the attributes are separated from the image by a space, as in `![a](a.png) {height=40%}`, dragging inserts a new `{width=NN%}` directly after the image and leaves the separated attributes in place.
+- The selection does not end when keyboard focus leaves the editor. If you select an image, click into the sidebar, return to the editor with the keyboard, and press Delete, the still-selected image is deleted. Returning with a mouse click ends the selection first.
+
 ### Lines that contain only images are centered
 
 ![A bar chart on a line of its own, centered in the text column between two justified paragraphs](Manual_Images/editor-image-line-centered.png)
@@ -150,9 +220,8 @@ When the cursor or a selection touches an image and the image is shown as source
 
 Known limitations:
 
-- When a space separates the image from its attributes, as in `![a](a.png) {width=50%}`, the attributes still apply to the image but the line is not centered.
-- On a line with attributes, the attribute text (for example `{width=50%}`) stays visible to the right of the image and is centered together with it, so the image itself sits slightly left of center.
-- A percentage width such as `{width=50%}` is measured against the image's own natural size in the editor, not against the width of the text column, and the image keeps the space of its natural width, which leaves a gap before the attribute text.
+- When a space separates the image from its attributes, as in `![a](a.png) {width=50%}`, the attributes still apply to the image, but the line is not centered and the attribute text stays visible.
+- While the cursor is inside the attributes without touching the image itself, the attribute text appears to the right of the image and is centered together with it, so the image sits slightly left of center until the cursor moves away.
 - The editor decides line by line, whereas Export to HTML decides paragraph by paragraph, so two cases look different: a text line followed by an image on the next line, joined by a single line break, has its image line centered in the editor but the whole paragraph uncentered in the export; two consecutive lines with one image each are centered separately in the editor but appear side by side and centered as a pair in the export.
 
 ### Inline code
@@ -660,11 +729,12 @@ These are visible results of the conversion, in the preview and in exported file
 ### Known limitations of the PPTX features
 
 - The preview and the export work on Windows only and require desktop PowerPoint, the Anaconda Python installation at the location the program expects, pandoc, and the external conversion script.
-- The preview and Sync Scroll are both off after every restart.
+- Preview and Sync Scroll are both off after every restart.
+- The Pandoc Extensions settings in the Import and Export section of the preferences ("Mark extension" and "Alerts extension") have no effect on the preview or on Export to PPTX.
 
 ## Export to HTML
 
-Export to HTML turns a Markdown document into a single, self-contained HTML file that looks like the document in the editor. The file can be passed on or opened anywhere without extra files.
+Export to HTML turns a Markdown document into a single, self-contained HTML file that looks like the document in the editor. As long as all images can be embedded, the file can be shared or opened anywhere without extra files.
 
 ### How to start it
 
@@ -680,10 +750,12 @@ No dialog asks for options.
 - The file `<name>.html` is written into the folder of the document. If a file of that name already exists and was not produced by this export, the new file is named `<name>__LYH_HTML_<yyyymmdd_hhmmss>.html` instead, so foreign files are never overwritten. An earlier export of the same document is replaced.
 - The export uses the document as saved on disk. Save unsaved changes first if they should be included.
 - When the preference "Automatically open successfully exported files" is on, the file opens in the default browser. Otherwise it is shown in Windows Explorer.
+- When some local images could not be embedded, a warning lists them after the file has been written (see "Images in the HTML file"). If "Automatically open successfully exported files" is also on, the file opens only after you close this warning, so the browser window cannot cover it.
 
 ### What the HTML file contains
 
-- Images are embedded into the file. An image that cannot be read keeps its original link.
+- Local images are embedded into the file; see "Images in the HTML file" for the exceptions.
+- Images are at most as wide and as high as the two "Image size" settings allow, by default as wide as the text column and half as high as the browser window; see "Configuration reference".
 - When the document contains math, the math fonts are embedded as well.
 - Mermaid diagrams are included as finished drawings. A diagram that cannot be drawn shows "Could not render Graph:" followed by the error.
 - Code blocks are syntax-highlighted.
@@ -700,10 +772,38 @@ No dialog asks for options.
 
 Left: the document in the editor. Right: the exported file opened in a browser, with the same justified paragraph, centered chart, right-aligned and centered table columns, task checkboxes, and highlighted code.
 
+### Images in the HTML file
+
+Local images (files stored on your computer) are embedded into the HTML file, so it can display them without the original image files. Images with a web address are left as links and loaded from the web when the file is opened.
+
+A local image that cannot be embedded is linked instead. This happens when the image file does not exist, cannot be read, or has an extension other than png, jpg, jpeg, gif, webp, svg, bmp, ico, avif, tif, or tiff. The link is the image's path relative to the HTML file's folder, which is always the document's folder. For example, when the document is in `Manuscript` and the image `Fig 1#a.svg` is in the neighboring folder `Figures`, the link reads `../Figures/Fig%201%23a.svg`.
+
+In such a link, only characters that would break it are percent-encoded: the percent sign, `#`, `?`, `&`, quotation marks and apostrophes, angle brackets, the backtick, the colon, spaces and other whitespace, and control characters. All other characters, including Chinese and other non-Latin letters, are kept as they are, so the path stays readable in the HTML source.
+
+When the image is on a different drive from the HTML file, or one of the two is on a network share, no relative path exists. The image is then linked by its absolute file address (`file:///…`).
+
+When at least one local image could not be embedded, the HTML file is still written, and a warning titled "Export to HTML" appears afterwards. If one image failed, the message reads "1 image could not be embedded into the HTML file"; if several failed, it reads "N images could not be embedded into the HTML file". The details say the HTML file was written but that the listed images could not be read, so they will be missing if the HTML file is opened elsewhere or uploaded on its own. Below the message is one line per image: its path relative to the document's folder, written with forward slashes and without percent-encoding, and the reason in parentheses. When no relative path exists, the line shows the image's absolute path instead. An image referenced several times is listed once. The only button is Ok.
+
+For example, when the document is in `Manuscript` and the image `Figure 1.png` is missing from the neighboring folder `Figures`, the warning shows the line `• ../Figures/Figure 1.png (file not found)`, while the link in the HTML file reads `../Figures/Figure%201.png`.
+
+| Reason | Meaning and remedy |
+|---|---|
+| file not found | No file exists at the referenced path. Correct the path in the document, or put the image back, and export again. |
+| unsupported image format | The file's extension is not one of those listed above, so the image cannot be embedded. This reason is shown even when the file does not exist. Convert the image to one of the listed formats and export again. |
+| file could not be read | The file exists, but reading it failed. Check that the file can be opened, then export again. |
+
+The warning lists at most 20 images. Any remaining ones are summarized in a last line "…and N more (see the log for the full list)". The program's log names every image that could not be embedded, using its original image address rather than the path shown in the warning, and records after each export the number of embedded and linked images.
+
+[Manual pending] A screenshot of the warning that lists the images which could not be embedded is missing; producing it needs a running copy of the program, which this update could not start.
+
 Known limitations:
 
 - The export reads the saved file, so unsaved changes are not included.
-- Problems while embedding images or opening the result are written to the program's log and are not shown as messages.
+- An image that could not be embedded is only linked, so the HTML file shows it only while the image file exists at the linked location. Moving the HTML file to another folder, or sending it on its own, breaks relative links.
+- The warning lists at most 20 images that could not be embedded. The complete list is only in the program's log.
+- The reason in the warning is determined after the file has been written. If an image is moved, deleted, or changed while the export runs, the reason shown may differ from the actual cause of the failure.
+- Images with a web address are not checked. The warning never mentions them, even when they cannot be loaded.
+- When the exported file cannot be opened, the problem is written to the program's log and is not shown as a message.
 
 ## Configuration reference
 
@@ -721,11 +821,13 @@ These settings keep Zettlr's defaults.
 | Setting | Where | Effect in Zettlr-LYH |
 |---|---|---|
 | Render pandoc divs and spans (`display.renderPandoc`), on | Preferences | Also switches the rendering of HTML blocks, inline HTML elements, and inline formatting tags. |
-| Render images (`display.renderImages`) | Preferences | Also switches the centering of lines that contain only images. |
-| Showing syntax when the cursor is adjacent (`previewModeShowSyntaxWhenCursorIsAdjacent`) | Preferences | Decides whether a cursor next to an image counts as touching it, which ends the centering of its line. |
+| Render images (`display.renderImages`) | Preferences | Also switches the centering of lines that contain only images, and whether a rendered image can be selected with a click and resized by dragging. |
+| Showing syntax when the cursor is adjacent (`previewModeShowSyntaxWhenCursorIsAdjacent`) | Preferences | Decides whether a cursor next to an image counts as touching it, which ends the centering of its line, and whether a cursor directly next to the attributes after a rendered image shows them. |
+| "Restrict width to N %" (`display.imageWidth`), 100, and "Restrict height to N %" (`display.imageHeight`), 50 | Preferences → Editor → "Image size" | Apply only to Export to HTML: images in the exported file are at most N% of the text column wide and at most N% of the browser window high. A width of 0 counts as 100, and a height of 0 or 100 sets no height limit. They have no effect on images in the editor, although the description of the section reads "Restrict images to a percentage of the available editor width and height." |
 | Show Markdown file extensions (`display.markdownFileExtensions`), off | Preferences | Whether file names in tabs and the file manager carry their extension. |
 | Always load remote changes to the current file (`alwaysReloadFiles`) | Preferences | When on, files changed on disk are reloaded without asking unless the editor holds unsaved changes. |
 | Automatically open successfully exported files (`export.autoOpenExportedFiles`) | Preferences | Decides whether an HTML export opens in the browser or is shown in Windows Explorer. |
+| Pandoc Extensions: "Mark extension" (`export.forceEnableExtensions.mark`) and "Alerts extension" (`export.forceEnableExtensions.alerts`), both on | Preferences → Import and Export | Have no effect on the PPTX preview, Export to PPTX, or Export to HTML, including when an HTML format is chosen in Zettlr's Export… dialog. The other exports of the Export… dialog use them as in Zettlr. |
 | `showPandocDivSpanButton` under `displayToolbarButtons`, on | Configuration file only | Shows or hides "Insert Div" and "Insert Span". |
 
 ### What is remembered across restarts
@@ -765,6 +867,12 @@ Each message appears in the result text next to "Export to PPTX", preceded by th
 | Overflows by X pt, split this page | The text of the page runs past the slide; split the page. |
 | Below 22 pt: … (X pt) | Text on this page was shrunk below 22 points. |
 
+### Messages of Export to HTML
+
+| Message | Meaning and remedy |
+|---|---|
+| 1 image could not be embedded into the HTML file (or "N images could not be embedded into the HTML file") | The HTML file was written, but the local images listed in the warning are not embedded in it; they appear only while their image files stay at the linked locations. Each line names the reason; see "Images in the HTML file" for the meaning and remedy of each reason. |
+
 ### Dialogs about unsaved changes and changes on disk
 
 | Dialog | Meaning |
@@ -780,6 +888,8 @@ Each message appears in the result text next to "Export to PPTX", preceded by th
 - A checkbox under Preferences → Appearance → Toolbar buttons has no effect: the buttons "Open settings", "New file", "Previous file", "Next file", and the word/character counter are not part of this toolbar.
 - "MD → PPTX" does nothing: the active file is not a Markdown file.
 - "Export Formula-Calculated Copy" is missing from the tab menu: the saved file contains no formula. Save the document first if the formulas were added only in the editor.
+- An image does not show in an exported HTML file: the image could not be embedded and is only linked, and the image file is not at the linked location. The warning shown after the export names each affected image and the reason. When more than 20 images are affected, the complete list is in the program's log. See "Images in the HTML file". Images with a web address are not checked.
+- Changing "Restrict width to N %" or "Restrict height to N %" under Preferences → Editor → "Image size" does not change the images in the editor: these settings apply only to Export to HTML. To change the size of an image in the editor, write a width after it or drag its handles; see "Image sizes in the editor" and "Selecting and resizing an image".
 
 ## Known limitations
 
@@ -791,10 +901,14 @@ Each message appears in the result text next to "Export to PPTX", preceded by th
 - The toolbar checkboxes "Open settings", "New file", "Previous file", "Next file", and the word/character counter have no effect.
 - The Files history keeps only the 200 most recently opened files.
 - Lines that contain only images are centered line by line in the editor but paragraph by paragraph in Export to HTML, and a space between an image and its attributes prevents centering.
+- Only Markdown images rendered in the editor can be selected and resized by dragging; images in table cells and inline HTML `<img>` elements cannot. Dragging always writes a percentage of the text column, and an image stays selected when keyboard focus leaves the editor.
+- The "Image size" settings in Preferences apply only to Export to HTML, although their description mentions the editor.
 - "Paste row" never adds rows or columns, and cells containing tabs or line breaks do not copy cleanly.
 - You can copy a block of table cells selected by dragging, but you cannot delete, cut, or overwrite them by pasting. You cannot extend the block with Shift and a click, you cannot select a block with the keyboard, and the block copies as Markdown source rather than formatted text.
 - Task checkboxes in table cells need each task line to start with `-` and the lines to be separated by plain `<br>` tags. If the task prefixes are wrapped in formatting or inline code, the checkboxes won't render.
 - Images in table cells do not display when their address is a Windows absolute path or a `file://` address.
 - After clicking into a rendered table cell, the cursor position is only approximate when the clicked text does not appear in the source, such as a citation or the result of a bracketed formula. In a cell that holds only images, the cursor goes to the end of the cell's source. Pasting several lines of text into a table cell joins them with spaces instead of `<br>` line breaks, and moving into another cell with Up or Down keeps the horizontal position only approximately. Image files pasted or dropped from disk are linked with backslashes and unencoded spaces on Windows.
 - Export to HTML and Export Formula-Calculated Copy read the saved file, not unsaved changes in the editor.
+- Local images that Export to HTML cannot embed are only linked, so they won't appear once the HTML file is moved to another folder or shared on its own. The warning after the export lists at most 20 of them, and images with a web address are not checked.
+- The Pandoc Extensions settings ("Mark extension" and "Alerts extension") have no effect on the PPTX preview, Export to PPTX, or Export to HTML.
 - Bracketed formulas know only the units g, mg, mol, mmol, L, mL, and µL and the result dimensions listed in their table.
