@@ -24,7 +24,7 @@ import path from 'path'
  * user name or drive letter ever ends up in the code.
  */
 export const CONVERSION_SCRIPT_HOME_RELATIVE_SEGMENTS = [
-  '.claude', 'skills', 'PPT-Maker-NotesInTheScales-Pandoc', 'scripts', 'Convert_Markdown_Deck.py'
+  '.claude', 'skills', 'PPT-Maker-NotesInTheScales-Pandoc-LYH', 'scripts', 'Convert_Markdown_Deck.py'
 ]
 
 /**

@@ -7,7 +7,7 @@
  *                  attribute keys per kind (mirroring the keys the PPTX
  *                  renderer Markdown_Modified_Pandoc_to_PPTX.py understands,
  *                  see Style_Attributes_Reference.md of the skill
- *                  PPT-Maker-NotesInTheScales-Pandoc), and the shapes that the
+ *                  PPT-Maker-NotesInTheScales-Pandoc-LYH), and the shapes that the
  *                  target finder (pandoc-attribute-targets.ts) hands to the
  *                  user interface (context menu section, toolbar popover).
  *

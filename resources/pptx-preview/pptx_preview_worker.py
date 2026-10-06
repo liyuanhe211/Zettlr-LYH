@@ -66,7 +66,7 @@ from pptx import Presentation
 
 CONVERT_SCRIPT_DIRECTORY = os.path.join(
     os.environ["USERPROFILE"],
-    r".claude\skills\PPT-Maker-NotesInTheScales-Pandoc\scripts")
+    r".claude\skills\PPT-Maker-NotesInTheScales-Pandoc-LYH\scripts")
 sys.path.insert(0, CONVERT_SCRIPT_DIRECTORY)
 import Convert_Markdown_Deck  # noqa: E402  (needs the sys.path insertion above)
 

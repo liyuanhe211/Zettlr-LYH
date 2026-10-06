@@ -1079,7 +1079,7 @@ function getToolbarButtonDisplay (configName: keyof ConfigOptions['displayToolba
 
 <style lang="less">
 // The pandoc PPTX preview toggle is a checkable text push button following the
-// flat light design language of the PyQt6_GUI_Design_Rules skill: neutral fill
+// flat light design language of the PyQt6-GUI-Design-Rules-LYH skill: neutral fill
 // with a 1 px border and bold label while off, hover signalled by the
 // accent-blue border, pressed one shade darker, and checked (= the active
 // document's preview is open) held down in running green. The #toolbar
