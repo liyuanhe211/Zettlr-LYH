@@ -7,7 +7,10 @@
  * Maintainer:      Hendrik Erz
  * License:         GNU GPL v3
  *
- * Description:     This renderer can display and manage images.
+ * Description:     This renderer can display and manage images. A single click
+ *                  selects a rendered image and shows its resize handles,
+ *                  dragging a handle changes the width of the image, and a
+ *                  double click reveals the image source for editing.
  *
  * END HEADER
  */
@@ -15,13 +18,21 @@
 import { renderInlineWidgets } from './base-renderer'
 import { type SyntaxNode, type SyntaxNodeRef } from '@lezer/common'
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
-import { type EditorState } from '@codemirror/state'
+import { Prec, type EditorState } from '@codemirror/state'
 import { configField } from '../util/configuration'
 import { findImageOnlyLines, isRenderableImageNode } from '../util/image-only-lines'
+import {
+  buildImageWidthChanges,
+  computeResizedWidthPercent,
+  findHiddenImageAttributeRanges,
+  findImageAt,
+  imageSourceRange,
+  selectImageEffect,
+  selectedImageField
+} from '../util/image-selection'
 import makeValidUri from '@common/util/make-valid-uri'
 import { linkImageMenu } from '../context-menu/link-image-menu'
 import { trans } from '@common/i18n-renderer'
-import clickAndSelect from './click-and-select'
 import { pathDirname } from '@common/util/renderer-path-polyfill'
 import { syntaxTree } from '@codemirror/language'
 import { parsePandocAttributes, type ParsedPandocAttributes } from 'source/common/pandoc-util/parse-pandoc-attributes'
@@ -76,6 +87,279 @@ function normalizeSize (size?: string): string | undefined {
   return size.toLowerCase()
 }
 
+/**
+ * Applies the styles for an explicit width: the figure takes the given share
+ * of the line (enlarging small images as well), and the image fills the
+ * figure. The global limits for image previews do not apply.
+ *
+ * @param   {HTMLElement}       figure  The figure element of the widget
+ * @param   {HTMLImageElement}  img     The image element of the widget
+ * @param   {string}            width   The CSS width, e.g. `50%`
+ * @param   {string|undefined}  height  The CSS height, or undefined to keep
+ *                                      the aspect ratio
+ */
+function applyExplicitWidthStyles (figure: HTMLElement, img: HTMLImageElement, width: string, height: string|undefined): void {
+  figure.style.width = width
+  figure.style.maxWidth = '100%'
+  figure.style.maxHeight = ''
+  img.style.width = '100%'
+  img.style.maxWidth = '100%'
+  img.style.maxHeight = ''
+  img.style.height = height ?? 'auto'
+}
+
+/**
+ * Applies the size styles of an image according to its Pandoc attributes.
+ * With a width, the image takes that share of the text column. Without one,
+ * the image is shown at its natural size, and an image wider than the text
+ * column is scaled down to exactly the full width of the column, keeping its
+ * aspect ratio. The maximum image preview width and height from the
+ * preferences (`display.imageWidth` and `display.imageHeight`) do not apply to
+ * the editor preview. The recognized width is remembered on the figure
+ * (`data-image-width`) for the size label.
+ *
+ * @param   {HTMLElement}       figure      The figure element of the widget
+ * @param   {HTMLImageElement}  img         The image element of the widget
+ * @param   {Record}            properties  The key-value attributes, if any
+ */
+function applySizeStyles (
+  figure: HTMLElement,
+  img: HTMLImageElement,
+  properties: Record<string, string>|undefined
+): void {
+  const width = normalizeSize(properties?.width ?? properties?.w)
+  const height = normalizeSize(properties?.height ?? properties?.h)
+  figure.dataset.imageWidth = width ?? ''
+
+  if (width !== undefined) {
+    applyExplicitWidthStyles(figure, img, width, height)
+    return
+  }
+
+  // Without an explicit width, the image keeps its natural size, and the
+  // maximum width of 100% scales a wider image down to the full width of the
+  // text column. The height stays automatic, so the aspect ratio is kept.
+  // Only an explicit height limits the height.
+  const maxHeight = height ?? ''
+
+  figure.style.width = ''
+  figure.style.maxWidth = '100%'
+  figure.style.maxHeight = maxHeight
+  // We need to apply the same max width/height styles to the image as to the
+  // figure. Otherwise the image will be cropped.
+  img.style.width = ''
+  img.style.height = ''
+  img.style.maxWidth = '100%'
+  img.style.maxHeight = maxHeight
+}
+
+/**
+ * Updates the size label of an image: the natural size once the image has
+ * loaded, followed by the width if there is one, separated by a middle dot
+ * (e.g. 1200 times 800 pixels, then 50%).
+ *
+ * @param   {HTMLImageElement}  img    The image element of the widget
+ * @param   {HTMLElement}       size   The size label element
+ * @param   {string}            width  The width to show, or an empty string
+ */
+function updateSizeLabel (img: HTMLImageElement, size: HTMLElement, width: string): void {
+  const parts: string[] = []
+  if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+    parts.push(`${img.naturalWidth}\u00D7${img.naturalHeight}`)
+  }
+  if (width !== '') {
+    parts.push(width)
+  }
+  size.textContent = parts.join(' \u00B7 ')
+}
+
+/**
+ * Returns the start position of the image a widget displays. Widgets may be
+ * reused for other positions, so this is determined from the DOM whenever an
+ * event happens.
+ *
+ * @param   {EditorView}        view    The editor view
+ * @param   {HTMLElement}       figure  The figure element of the widget
+ *
+ * @return  {number|undefined}          The start of the image, or undefined if
+ *                                      the widget is no longer in the editor
+ */
+function imagePositionOf (view: EditorView, figure: HTMLElement): number|undefined {
+  try {
+    return view.posAtDOM(figure)
+  } catch (err) {
+    return undefined
+  }
+}
+
+/**
+ * Selects the source of an image including its attributes, which reveals the
+ * source in place of the rendered image, and clears the image selection.
+ *
+ * @param   {EditorView}  view       The editor view
+ * @param   {number}      imageFrom  The start of the image
+ *
+ * @return  {boolean}                Whether there was an image to select
+ */
+function selectImageSource (view: EditorView, imageFrom: number): boolean {
+  const range = imageSourceRange(view.state, imageFrom)
+  if (range === undefined) {
+    return false
+  }
+
+  view.dispatch({ selection: { anchor: range.from, head: range.to }, effects: selectImageEffect.of(null) })
+  view.focus()
+  return true
+}
+
+/**
+ * Parses a CSS pixel value, returning 0 for anything unparseable
+ */
+function pixelsOf (value: string): number {
+  const parsed = parseFloat(value)
+  return Number.isNaN(parsed) ? 0 : parsed
+}
+
+/**
+ * Returns the width of the content box of an element, i.e. the width that
+ * percentage widths of its children refer to.
+ *
+ * @param   {Element|null}  element  The element
+ *
+ * @return  {number}                 The width in pixels, or 0
+ */
+function contentWidthOf (element: Element|null): number {
+  if (!(element instanceof HTMLElement)) {
+    return 0
+  }
+
+  const style = window.getComputedStyle(element)
+  return element.clientWidth - pixelsOf(style.paddingLeft) - pixelsOf(style.paddingRight)
+}
+
+/**
+ * Creates a resize handle for one side of an image. Dragging it shows the new
+ * width live; releasing it writes the width into the attributes of the image
+ * as a single undoable step. Escape or a cancelled pointer restores the
+ * previous size without changing the document.
+ *
+ * @param   {EditorView}        view       The editor view
+ * @param   {HTMLElement}       figure     The figure element of the widget
+ * @param   {HTMLImageElement}  img        The image element of the widget
+ * @param   {HTMLElement}       size       The size label element
+ * @param   {'left'|'right'}    side       Which side the handle sits on
+ * @param   {Function}          onResized  Called after a new width has been
+ *                                         written into the document
+ *
+ * @return  {HTMLElement}                  The handle element
+ */
+function createResizeHandle (
+  view: EditorView,
+  figure: HTMLElement,
+  img: HTMLImageElement,
+  size: HTMLElement,
+  side: 'left'|'right',
+  onResized: () => void
+): HTMLElement {
+  const handle = document.createElement('span')
+  handle.classList.add('image-resize-handle', side)
+  handle.setAttribute('title', trans('Drag to change the width'))
+
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) {
+      return
+    }
+
+    // Keep the editor from handling the press, and route all further pointer
+    // events to the handle, even if the pointer leaves it.
+    event.preventDefault()
+    event.stopPropagation()
+    handle.setPointerCapture(event.pointerId)
+
+    const line = figure.closest('.cm-line')
+    const startX = event.clientX
+    const startWidth = figure.getBoundingClientRect().width
+    // Percentage widths refer to the content box of the line
+    const containerWidth = contentWidthOf(line ?? figure.parentElement)
+    // In a centered line, the image grows to both sides at once
+    const centered = line !== null && line.classList.contains('cm-image-only-line')
+    const figureStyle = figure.style.cssText
+    const imageStyle = img.style.cssText
+    let widthPercent: number|undefined
+
+    const finish = (): void => {
+      handle.removeEventListener('pointermove', onPointerMove)
+      handle.removeEventListener('pointerup', onPointerUp)
+      handle.removeEventListener('pointercancel', onCancel)
+      handle.removeEventListener('lostpointercapture', onCancel)
+      window.removeEventListener('keydown', onKeyDown, true)
+      if (handle.hasPointerCapture(event.pointerId)) {
+        handle.releasePointerCapture(event.pointerId)
+      }
+    }
+
+    const restore = (): void => {
+      figure.style.cssText = figureStyle
+      img.style.cssText = imageStyle
+      updateSizeLabel(img, size, figure.dataset.imageWidth ?? '')
+    }
+
+    const onPointerMove = (moveEvent: PointerEvent): void => {
+      widthPercent = computeResizedWidthPercent({
+        startWidth,
+        deltaX: moveEvent.clientX - startX,
+        side,
+        centered,
+        containerWidth
+      })
+      applyExplicitWidthStyles(figure, img, `${widthPercent}%`, undefined)
+      updateSizeLabel(img, size, `${widthPercent}%`)
+    }
+
+    const onPointerUp = (): void => {
+      finish()
+      const imageFrom = imagePositionOf(view, figure)
+      if (widthPercent === undefined || imageFrom === undefined) {
+        restore()
+        return
+      }
+
+      const changes = buildImageWidthChanges(view.state, imageFrom, widthPercent)
+      if (changes.length === 0) {
+        restore()
+        return
+      }
+
+      // The attributes follow the image, so its start stays the same
+      view.dispatch({ changes, effects: selectImageEffect.of(imageFrom), userEvent: 'input.resize-image' })
+      onResized()
+    }
+
+    const onCancel = (): void => {
+      finish()
+      restore()
+    }
+
+    const onKeyDown = (keyEvent: KeyboardEvent): void => {
+      if (keyEvent.key !== 'Escape') {
+        return
+      }
+      // Cancel the drag only; the image stays selected
+      keyEvent.preventDefault()
+      keyEvent.stopPropagation()
+      onCancel()
+    }
+
+    handle.addEventListener('pointermove', onPointerMove)
+    handle.addEventListener('pointerup', onPointerUp)
+    handle.addEventListener('pointercancel', onCancel)
+    handle.addEventListener('lostpointercapture', onCancel)
+    window.addEventListener('keydown', onKeyDown, true)
+  })
+
+  return handle
+}
+
 class ImageWidget extends WidgetType {
   constructor (
     readonly node: SyntaxNode,
@@ -83,13 +367,21 @@ class ImageWidget extends WidgetType {
     readonly imageUrl: string,
     readonly resolvedImageUrl: string,
     readonly altText: string,
-    readonly data: ParsedPandocAttributes
+    readonly data: ParsedPandocAttributes,
+    readonly selected: boolean
   ) {
     super()
   }
 
   eq (other: ImageWidget) {
-    return this.imageTitle === other.imageTitle && this.imageUrl === other.imageUrl && this.altText === other.altText
+    const properties = this.data.properties
+    const otherProperties = other.data.properties
+    return this.imageTitle === other.imageTitle &&
+      this.imageUrl === other.imageUrl &&
+      this.altText === other.altText &&
+      this.selected === other.selected &&
+      (properties?.width ?? properties?.w) === (otherProperties?.width ?? otherProperties?.w) &&
+      (properties?.height ?? properties?.h) === (otherProperties?.height ?? otherProperties?.h)
   }
 
   get estimatedHeight (): number {
@@ -102,21 +394,7 @@ class ImageWidget extends WidgetType {
     //////////////////////////////////////////
     const figure = document.createElement('figure')
     figure.classList.add('image-preview')
-
-    // Retrieve and apply the size constraints
-    const { imagePreviewHeight, imagePreviewWidth } = view.state.field(configField)
-    const defaultWidth = (!Number.isNaN(imagePreviewWidth)) ? `${imagePreviewWidth}%` : '100%'
-    const defaultHeight = (!Number.isNaN(imagePreviewHeight)) ? `${imagePreviewHeight}vh` : '100vh'
-
-    // Normalize the local width/height arguments
-    const normWidth = normalizeSize(this.data.properties?.width)
-    const normHeight = normalizeSize(this.data.properties?.height)
-    // Generate maxWidth/height properties
-    const maxWidth = normWidth !== undefined ? `min(${normWidth}, ${defaultWidth})` : defaultWidth
-    const maxHeight = normHeight !== undefined ? `min(${normHeight}, ${defaultHeight})` : defaultHeight
-
-    figure.style.maxWidth = maxWidth
-    figure.style.maxHeight = maxHeight
+    figure.classList.toggle('selected', this.selected)
 
     // Display a context menu with the current image node
     figure.addEventListener('contextmenu', (event) => {
@@ -134,12 +412,13 @@ class ImageWidget extends WidgetType {
     // IMG
     //////////////////////////////////////////
     const img = document.createElement('img')
-    // We need to apply the same max width/height styles to the image as to the
-    // figure. Otherwise the image will be cropped.
-    img.style.maxWidth = maxWidth
-    img.style.maxHeight = maxHeight
     img.alt = this.altText
     img.title = this.imageTitle
+    // Dragging the image itself would start the browser's native image drag
+    img.draggable = false
+
+    // Retrieve and apply the size constraints
+    applySizeStyles(figure, img, this.data.properties)
 
     // Store some crucial information on the node itself
     img.dataset.from = String(this.node.from)
@@ -147,9 +426,34 @@ class ImageWidget extends WidgetType {
     img.dataset.originalUrl = this.imageUrl
     img.dataset.title = this.imageTitle
 
-    // Select the underlying node
-    img.addEventListener('click', event => {
-      clickAndSelect(view)(event)
+    // A single click selects the image (showing its resize handles) without
+    // revealing the source. The editor selection stays as it is, so the image
+    // remains rendered.
+    img.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) {
+        return
+      }
+
+      // Prevent the browser from placing the cursor next to the image
+      event.preventDefault()
+      view.focus()
+      const imageFrom = imagePositionOf(view, figure)
+      if (imageFrom === undefined || view.state.field(selectedImageField, false) === imageFrom) {
+        return
+      }
+
+      if (findImageAt(view.state, imageFrom) !== undefined) {
+        view.dispatch({ effects: selectImageEffect.of(imageFrom) })
+      }
+    })
+
+    // A double click reveals the source for editing
+    img.addEventListener('dblclick', (event) => {
+      event.preventDefault()
+      const imageFrom = imagePositionOf(view, figure)
+      if (imageFrom !== undefined) {
+        selectImageSource(view, imageFrom)
+      }
     })
 
     // Display a replacement image in case the correct one is not found
@@ -159,18 +463,9 @@ class ImageWidget extends WidgetType {
       caption.contentEditable = 'false'
     }
 
-    // Update the image title on load to retrieve the real image size.
-    img.onload = () => {
-      img.title = `${img.dataset.title!.replace(/\\"/g, '"')} (${img.naturalWidth}x${img.naturalHeight}px)`
-      size.innerHTML = `${img.naturalWidth}&times;${img.naturalHeight}`
-
-      // Determine if the image can be opened externally
-      if (isDataUrl(img.dataset.originalUrl!) && figure.contains(openExternally)) {
-        figure.removeChild(openExternally)
-      } else if (!figure.contains(openExternally)) {
-        figure.appendChild(openExternally)
-      }
-
+    // Shows or hides the surrounding elements depending on the rendered size,
+    // and caches the rendered height
+    const refreshOverlays = (): void => {
       const { width, height } = figure.getBoundingClientRect()
 
       // Determine if the image is wide enough to display the surrounding elements
@@ -188,6 +483,21 @@ class ImageWidget extends WidgetType {
       // inaccurate, but can be solved by the user with a simple Ctrl+A, which
       // will force-reload everything.
       IMAGE_HEIGHT_CACHE.set(this.resolvedImageUrl, height)
+    }
+
+    // Update the image title on load to retrieve the real image size.
+    img.onload = () => {
+      img.title = `${img.dataset.title!.replace(/\\"/g, '"')} (${img.naturalWidth}x${img.naturalHeight}px)`
+      updateSizeLabel(img, size, figure.dataset.imageWidth ?? '')
+
+      // Determine if the image can be opened externally
+      if (isDataUrl(img.dataset.originalUrl!) && figure.contains(openExternally)) {
+        figure.removeChild(openExternally)
+      } else if (!figure.contains(openExternally)) {
+        figure.appendChild(openExternally)
+      }
+
+      refreshOverlays()
     }
 
     //////////////////////////////////////////
@@ -265,10 +575,19 @@ class ImageWidget extends WidgetType {
     const size = document.createElement('span')
     size.classList.add('image-size-info')
 
+    //////////////////////////////////////////
+    // RESIZE HANDLES
+    //////////////////////////////////////////
+    // Only visible while the image is selected
+    const leftHandle = createResizeHandle(view, figure, img, size, 'left', refreshOverlays)
+    const rightHandle = createResizeHandle(view, figure, img, size, 'right', refreshOverlays)
+
     // Finally, construct the DOM tree, start loading the image, and return
     figure.appendChild(img)
     figure.appendChild(caption)
     figure.appendChild(size)
+    figure.appendChild(leftHandle)
+    figure.appendChild(rightHandle)
 
     img.src = resolveImageUrl(view.state.field(configField).metadata.path, this.imageUrl)
 
@@ -281,7 +600,12 @@ class ImageWidget extends WidgetType {
     // be rebuilt.
     try {
       // First, update the image itself
-      const img = dom.querySelector('img')! as HTMLImageElement
+      const img = dom.querySelector('img')
+      const size = dom.querySelector<HTMLElement>('.image-size-info')
+      if (img === null || size === null) {
+        return false
+      }
+
       img.dataset.from = String(this.node.from)
       img.dataset.to = String(this.node.to)
       img.dataset.originalUrl = this.imageUrl
@@ -291,6 +615,11 @@ class ImageWidget extends WidgetType {
         const caption = dom.querySelector('figcaption')! as HTMLElement
         caption.textContent = this.imageTitle.replace(/\\"/g, '"') // Un-escape title
       }
+
+      // Then, the selection state and the size
+      dom.classList.toggle('selected', this.selected)
+      applySizeStyles(dom, img, this.data.properties)
+      updateSizeLabel(img, size, dom.dataset.imageWidth ?? '')
 
       const resolvedURL = resolveImageUrl(view.state.field(configField).metadata.path, this.imageUrl)
 
@@ -343,7 +672,19 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): ImageWidget | u
   }
 
   const resolvedImageSrc = resolveImageUrl(state.field(configField).metadata.path, url)
-  return new ImageWidget(node.node, title, url, resolvedImageSrc, alt, data)
+  const selected = state.field(selectedImageField, false) === node.from
+  return new ImageWidget(node.node, title, url, resolvedImageSrc, alt, data, selected)
+}
+
+/**
+ * Rebuild the image widgets whenever the selected image changes
+ *
+ * @param   {ViewUpdate}  update  The view update
+ *
+ * @return  {boolean}             True if the selected image changed
+ */
+function selectedImageChanged (update: ViewUpdate): boolean {
+  return update.startState.field(selectedImageField, false) !== update.state.field(selectedImageField, false)
 }
 
 const imageOnlyLineDecoration = Decoration.line({ class: 'cm-image-only-line' })
@@ -377,6 +718,106 @@ const imageOnlyLines = ViewPlugin.fromClass(class {
   decorations: plugin => plugin.decorations
 })
 
+const hiddenAttributeDecoration = Decoration.replace({})
+
+/**
+ * Hides the Pandoc attributes (`{width=50%}`) directly following the visible
+ * rendered images, so that they do not show up next to the image.
+ *
+ * @param   {EditorView}     view  The editor view
+ *
+ * @return  {DecorationSet}        The replace decorations
+ */
+function hideImageAttributes (view: EditorView): DecorationSet {
+  const includeAdjacent = view.state.field(configField, false)?.previewModeShowSyntaxWhenCursorIsAdjacent ?? true
+  const ranges = findHiddenImageAttributeRanges(view.state, view.visibleRanges, includeAdjacent)
+  return Decoration.set(ranges.map(range => hiddenAttributeDecoration.range(range.from, range.to)))
+}
+
+const hiddenImageAttributes = ViewPlugin.fromClass(class {
+  decorations: DecorationSet
+
+  constructor (view: EditorView) {
+    this.decorations = hideImageAttributes(view)
+  }
+
+  update (update: ViewUpdate): void {
+    if (update.docChanged || update.viewportChanged || update.selectionSet) {
+      this.decorations = hideImageAttributes(update.view)
+    }
+  }
+}, {
+  decorations: plugin => plugin.decorations
+})
+
+/**
+ * Clears the image selection
+ */
+function clearImageSelection (view: EditorView): void {
+  view.dispatch({ effects: selectImageEffect.of(null) })
+}
+
+/**
+ * Editor-level handling of the image selection. Events inside the image
+ * widgets never reach these handlers, since the widgets ignore all events.
+ */
+const imageSelectionHandlers = Prec.highest(EditorView.domEventHandlers({
+  mousedown (event, view) {
+    // A click anywhere else in the editor ends the selection; the click itself
+    // proceeds as usual
+    const selected = view.state.field(selectedImageField, false)
+    if (selected !== null && selected !== undefined) {
+      clearImageSelection(view)
+    }
+    return false
+  },
+  keydown (event, view) {
+    const selected = view.state.field(selectedImageField, false)
+    if (selected === null || selected === undefined) {
+      return false
+    }
+
+    if (findImageAt(view.state, selected) === undefined) {
+      clearImageSelection(view)
+      return false
+    }
+
+    switch (event.key) {
+      case 'Escape':
+        clearImageSelection(view)
+        return true
+      case 'Delete':
+      case 'Backspace': {
+        const range = imageSourceRange(view.state, selected)
+        if (range === undefined) {
+          clearImageSelection(view)
+          return false
+        }
+        view.dispatch({
+          changes: { from: range.from, to: range.to },
+          selection: { anchor: range.from },
+          effects: selectImageEffect.of(null),
+          userEvent: 'delete'
+        })
+        return true
+      }
+      case 'Enter':
+        // Same as a double click: reveal the source for editing
+        return selectImageSource(view, selected)
+      case 'Shift':
+      case 'Control':
+      case 'Alt':
+      case 'Meta':
+        // Modifiers alone keep the selection
+        return false
+      default:
+        // Any other key ends the selection and is handled as usual
+        clearImageSelection(view)
+        return false
+    }
+  }
+}))
+
 export const renderImages = [
   EditorView.baseTheme({
     // Must be !important: the justification rule in MainEditor.vue is more specific
@@ -396,7 +837,10 @@ export const renderImages = [
         maxWidth: '100%'
       },
       '& :not(img)': { opacity: '0' },
-      '&:hover :not(img), &:focus-within :not(img)': { opacity: '1' },
+      '&:hover :not(img), &:focus-within :not(img), &.selected :not(img)': { opacity: '1' },
+      '&.selected': {
+        outline: '2px solid var(--system-accent-color, #1e88e5)'
+      },
       '& .image-size-info, & figcaption, & .open-externally-button': {
         position: 'absolute',
         transition: '0.2s opacity ease',
@@ -432,9 +876,37 @@ export const renderImages = [
           // Overwrite the important by the plugin
           backgroundColor: 'rgba(255, 255, 255, 0.8) !important'
         }
+      },
+      // The resize handles sit inside the figure (which clips its content) at
+      // the vertical middle of the left and right edges. They are only shown
+      // while the image is selected; these selectors are more specific than
+      // the opacity rules above.
+      '& .image-resize-handle': {
+        display: 'none',
+        position: 'absolute',
+        top: '50%',
+        width: '8px',
+        height: '32px',
+        marginTop: '-16px',
+        boxSizing: 'border-box',
+        backgroundColor: 'white',
+        border: '1px solid rgba(0, 0, 0, .6)',
+        borderRadius: '3px',
+        cursor: 'ew-resize',
+        touchAction: 'none',
+        zIndex: '1'
+      },
+      '& .image-resize-handle.left': { left: '3px' },
+      '& .image-resize-handle.right': { right: '3px' },
+      '&.selected .image-resize-handle': {
+        display: 'block',
+        opacity: '1'
       }
     }
   }),
-  renderInlineWidgets(shouldHandleNode, createWidget),
-  imageOnlyLines
+  selectedImageField,
+  renderInlineWidgets(shouldHandleNode, createWidget, selectedImageChanged),
+  imageOnlyLines,
+  hiddenImageAttributes,
+  imageSelectionHandlers
 ]

@@ -135,12 +135,20 @@ function renderWidgets (
  *                                          state and the syntax node and should
  *                                          return a widget to render in its
  *                                          place.
+ * @param   {Function}    shouldRebuild     Optional: a function that receives
+ *                                          a view update and returns true if
+ *                                          the widgets must be rebuilt even
+ *                                          though neither the document, the
+ *                                          viewport, nor the selection changed
+ *                                          (e.g., because a state field that
+ *                                          createWidget reads has changed).
  *
  * @return  {ViewPlugin}                    The instantiated ViewPlugin
  */
 export function renderInlineWidgets (
   shouldHandleNode: (node: SyntaxNodeRef) => boolean,
-  createWidget: (state: EditorState, node: SyntaxNodeRef) => WidgetType|undefined
+  createWidget: (state: EditorState, node: SyntaxNodeRef) => WidgetType|undefined,
+  shouldRebuild?: (update: ViewUpdate) => boolean
 ) {
   const plugin = ViewPlugin.fromClass(class {
     decorations: DecorationSet
@@ -150,7 +158,7 @@ export function renderInlineWidgets (
     }
 
     update (update: ViewUpdate): void {
-      if (update.docChanged || update.viewportChanged || update.selectionSet) {
+      if (update.docChanged || update.viewportChanged || update.selectionSet || shouldRebuild?.(update) === true) {
         this.decorations = renderWidgets(update.view.state, update.view.visibleRanges, shouldHandleNode, createWidget)
       }
     }
