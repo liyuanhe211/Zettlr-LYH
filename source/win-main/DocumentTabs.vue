@@ -431,7 +431,13 @@ function handleClickClose (event: MouseEvent, file: OpenDocument): void {
  * @param   {OpenDocument}  file   The file descriptor
  */
 function handleClickFilename (event: MouseEvent, file: OpenDocument): void {
-  if (event.button === 0) {
+  if (event.button === 1) {
+    // Chromium enters its middle-click autoscroll (scroll-lock) mode on
+    // mousedown, i.e. before the mouseup that closes the tab in
+    // handleMiddleMouseClick fires, so the preventDefault there comes too
+    // late to stop it. Prevent it here so a middle-click only closes the tab.
+    event.preventDefault()
+  } else if (event.button === 0) {
     // It was a left-click. (We must check because otherwise we would also
     // perform this action on a right-click (button === 2), but that event
     // must be handled by the container).
