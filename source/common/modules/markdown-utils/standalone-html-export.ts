@@ -12,7 +12,10 @@
  *                  rendered display, the assembly of the complete HTML
  *                  document, and the embedding of local images as data URIs.
  *                  The renderer supplies the converted body and the current
- *                  theme values; the main process embeds the images.
+ *                  theme values; the main process embeds the images and, for
+ *                  local images that cannot be embedded, supplies the link
+ *                  written in their place (via a callback, so that this file
+ *                  stays free of Node modules).
  *
  * END HEADER
  */
@@ -98,63 +101,90 @@ export function imageMimeType (imagePath: string): string|undefined {
 
 /**
  * Replaces the src attribute of every image that points to a local file by a
- * data URI holding the file's contents. Images that cannot be read keep their
- * original source.
+ * data URI holding the file's contents. A local image that cannot be embedded
+ * (its format is unknown, or the file cannot be read) is reported in
+ * failedSources; if linkFailedImage is given and returns a string for it, its
+ * src is replaced by that string (HTML-escaped), otherwise it keeps its
+ * original source. Images for which resolveSource returns undefined (remote or
+ * already embedded sources) are never passed to linkFailedImage and never
+ * changed. Each distinct src is resolved, read, and linked only once.
  *
- * @param   {string}    html           The HTML document
- * @param   {Function}  resolveSource  Maps a src value to an absolute local
- *                                     path, or undefined for remote sources
- * @param   {Function}  readFile       Reads a file's bytes
+ * @param   {string}    html             The HTML document
+ * @param   {Function}  resolveSource    Maps a src value to an absolute local
+ *                                       path, or undefined for remote sources
+ * @param   {Function}  readFile         Reads a file's bytes
+ * @param   {Function}  linkFailedImage  Optional: receives the (entity-decoded)
+ *                                       src and the absolute path of a local
+ *                                       image that could not be embedded, and
+ *                                       returns the src to write instead, or
+ *                                       undefined to keep the original one
  *
- * @return  {Promise}                  The new HTML, the number of embedded
- *                                     images, and the sources that failed
+ * @return  {Promise}                    The new HTML, the number of embedded
+ *                                       images, the number of images whose
+ *                                       src was replaced by linkFailedImage
+ *                                       (both counted per occurrence), and the
+ *                                       sources that could not be embedded
  */
 export async function inlineLocalImages (
   html: string,
   resolveSource: (source: string) => string|undefined,
-  readFile: (absolutePath: string) => Promise<Uint8Array>
-): Promise<{ html: string, inlinedCount: number, failedSources: string[] }> {
+  readFile: (absolutePath: string) => Promise<Uint8Array>,
+  linkFailedImage?: (source: string, absolutePath: string) => string|undefined
+): Promise<{ html: string, inlinedCount: number, linkedCount: number, failedSources: string[] }> {
   const pattern = /(<img\b[^>]*?\ssrc=")([^"]*)(")/gi
-  const dataURIs = new Map<string, string|undefined>()
+  // Per raw src: the new attribute value and whether it is an embedded data
+  // URI (rather than a link), or undefined to keep the original src
+  const replacements = new Map<string, { value: string, embedded: boolean }|undefined>()
   const failedSources: string[] = []
 
   for (const match of html.matchAll(pattern)) {
     const rawSource = match[2]
-    if (dataURIs.has(rawSource)) {
+    if (replacements.has(rawSource)) {
       continue
     }
 
     const source = decodeAttributeValue(rawSource)
     const absolutePath = resolveSource(source)
-    const mimeType = absolutePath !== undefined ? imageMimeType(absolutePath) : undefined
-    if (absolutePath === undefined || mimeType === undefined) {
-      dataURIs.set(rawSource, undefined)
-      if (absolutePath !== undefined) {
-        failedSources.push(source)
-      }
+    if (absolutePath === undefined) {
+      replacements.set(rawSource, undefined)
       continue
     }
 
-    try {
-      const bytes = await readFile(absolutePath)
-      dataURIs.set(rawSource, `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`)
-    } catch {
-      dataURIs.set(rawSource, undefined)
-      failedSources.push(source)
+    const mimeType = imageMimeType(absolutePath)
+    if (mimeType !== undefined) {
+      try {
+        const bytes = await readFile(absolutePath)
+        replacements.set(rawSource, {
+          value: `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`,
+          embedded: true
+        })
+        continue
+      } catch {
+        // The image cannot be read; it is handled as not embeddable below
+      }
     }
+
+    failedSources.push(source)
+    const link = linkFailedImage !== undefined ? linkFailedImage(source, absolutePath) : undefined
+    replacements.set(rawSource, typeof link === 'string' ? { value: escapeHTML(link), embedded: false } : undefined)
   }
 
   let inlinedCount = 0
+  let linkedCount = 0
   const result = html.replace(pattern, (whole, before: string, rawSource: string, after: string) => {
-    const dataURI = dataURIs.get(rawSource)
-    if (dataURI === undefined) {
+    const replacement = replacements.get(rawSource)
+    if (replacement === undefined) {
       return whole
     }
-    inlinedCount++
-    return `${before}${dataURI}${after}`
+    if (replacement.embedded) {
+      inlinedCount++
+    } else {
+      linkedCount++
+    }
+    return `${before}${replacement.value}${after}`
   })
 
-  return { html: result, inlinedCount, failedSources }
+  return { html: result, inlinedCount, linkedCount, failedSources }
 }
 
 /**
