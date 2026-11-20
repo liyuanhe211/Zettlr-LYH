@@ -55,6 +55,9 @@ import {
   handleAutocorrectEnter,
   handleAutocorrectSpace
 } from '../commands/autocorrect'
+import { insertNewlineInListContinuation } from '../commands/list-continuation-enter'
+import { tabOutOfCharacterPair } from '../commands/character-pair-tab-out'
+import { tabOutOfMath, deleteDollarPair } from '../plugins/math-dollar-input'
 import { addNewFootnote, selectFootnoteBeforeDelete } from '../commands/footnotes'
 import {
   maybeIndentList, maybeUnindentList, customMoveLineUp, customMoveLineDown
@@ -65,6 +68,7 @@ import {
   insertTabOrSpace
 } from '../commands/markdown'
 import { toggleCommentWithCursorInside } from '../commands/toggle-comment-cursor'
+import { markLyhRevise } from '../commands/mark-lyh-revise'
 import { pasteAsPlain, copyAsHTML } from '../util/copy-paste-cut'
 import { addColAfter, addColBefore, moveNextCell, movePrevCell, swapNextCol, swapPrevCol } from '../table-editor/commands/columns'
 import { alignTables, setAlignment } from '../table-editor/commands/tables'
@@ -116,6 +120,9 @@ export function mainEditorKeybindings (customShortcutMap: CustomEditorShortcut[]
     // Tabulator
     ...(autocompleteWithTab ? [{ key: 'Tab', run: acceptCompletion }] : []),
     { key: 'Tab', run: nextSnippet },
+    // Zettlr-LYH (R175): leave a "$" formula behind its closing delimiter
+    { key: 'Tab', run: tabOutOfMath },
+    { key: 'Tab', run: tabOutOfCharacterPair },
     { key: 'Tab', run: moveNextCell },
     { key: 'Tab', run: maybeIndentList },
     { key: 'Tab', run: insertTabOrSpace },
@@ -126,6 +133,10 @@ export function mainEditorKeybindings (customShortcutMap: CustomEditorShortcut[]
     
     // Enter
     ...(autocompleteWithEnter ? [{ key: 'Enter', run: acceptCompletion }] : []),
+    // NOTE: handleAutocorrectEnter itself runs insertNewlineContinueMarkup and
+    // consumes every Enter it can handle, so the continuation-line command for
+    // loose lists must come before it (it applies autocorrect on its own).
+    { key: 'Enter', run: insertNewlineInListContinuation },
     { key: 'Enter', run: handleAutocorrectEnter },
     { key: 'Enter', run: moveNextRow },
     { key: 'Enter', run: insertNewlineContinueMarkup },
@@ -138,6 +149,7 @@ export function mainEditorKeybindings (customShortcutMap: CustomEditorShortcut[]
     { key: 'Backspace', run: selectFootnoteBeforeDelete },
     { key: 'Backspace', run: handleBackspace },
     { key: 'Backspace', run: deleteMarkupBackward },
+    { key: 'Backspace', run: deleteDollarPair },
     { key: 'Backspace', run: deleteBracketPair },
     { key: 'Backspace', run: deleteCharBackward },
     { key: 'Shift-Backspace', run: deleteCharBackward },
@@ -270,6 +282,10 @@ export function mainEditorKeybindings (customShortcutMap: CustomEditorShortcut[]
     { key: sc('md-insert-image'), run: insertImage },
     { key: 'Mod-Shift-c', run: applyComment },
     { key: sc('md-insert-footnote'), run: addNewFootnote },
+    // Zettlr-LYH: wraps a non-empty selection as [selection{}] and inserts
+    // [{}] at a plain cursor. Ctrl+R always inserts a revision comment; the
+    // Rename file menu item uses F2 (R108).
+    { key: 'Mod-r', run: markLyhRevise },
 
     // historyKeymap, but with our own keyboard shortcuts
     { key: 'Mod-z', run: undo, preventDefault: true },
