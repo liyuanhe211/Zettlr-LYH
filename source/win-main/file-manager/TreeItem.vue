@@ -77,6 +77,7 @@
         v-bind:title="item.path"
         v-on:dragstart="beginDragging"
         v-on:drag="onDragHandler"
+        v-on:mousedown="handleNameMouseDown"
       >
         <template v-if="!nameEditing">
           {{ basename }}
@@ -231,6 +232,7 @@ const {
   onDragHandler,
   handleContextMenu,
   requestSelection,
+  handleNameMouseDown,
   finishNameEditing,
   isDirectory,
   selectedFile,

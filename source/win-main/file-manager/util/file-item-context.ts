@@ -42,7 +42,8 @@ export function displayFileContext (event: MouseEvent, fileObject: MDFileDescrip
     {
       label: trans('Rename file'),
       id: 'menu.rename_file',
-      accelerator: 'CmdOrCtrl+R',
+      // Zettlr-LYH (R108): Ctrl+R is reserved for Revise Comments
+      accelerator: 'F2',
       type: 'normal'
     },
     {

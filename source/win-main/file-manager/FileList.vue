@@ -298,7 +298,9 @@ function navigate (evt: KeyboardEvent): void {
         command: 'open-file',
         payload: {
           path: activeDescriptor.value.path,
-          newTab: false
+          newTab: false,
+          checkAgainstDisk: true, // Zettlr-LYH open-with disk check (R51)
+          insertAfterActiveTab: true
         }
       } as DocumentManagerIPCAPI)
         .catch(e => console.error(e))

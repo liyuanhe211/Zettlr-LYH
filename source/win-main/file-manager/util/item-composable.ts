@@ -18,12 +18,38 @@ import { displayFileContext } from './file-item-context'
 import { displayDirContext } from './dir-item-context'
 import { useConfigStore, useDocumentTreeStore, useWindowStateStore, useWorkspaceStore } from 'source/pinia'
 import type { AnyDescriptor } from 'source/types/common/fsal'
-import { ref, computed, type Ref, watch, nextTick } from 'vue'
+import { ref, computed, type Ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { hasImageExt, hasPDFExt } from 'source/common/util/file-extention-checks'
 import makeValidUri from 'source/common/util/make-valid-uri'
 import type { DocumentManagerIPCAPI } from 'source/app/service-providers/documents'
+import { createSlowClickRename, SLOW_CLICK_RENAME_DELAY } from '../../util/slow-click-rename'
 
 const ipcRenderer = window.ipc
+
+// Zettlr-LYH slow click rename (R101): when the window last came to the front,
+// since the click doing that does not count. One listener serves every item.
+let lastWindowFocusTime = Number.NEGATIVE_INFINITY
+let windowFocusTracked = false
+
+function trackWindowFocus (): void {
+  if (windowFocusTracked) {
+    return
+  }
+
+  window.addEventListener('focus', () => { lastWindowFocusTime = Date.now() })
+  windowFocusTracked = true
+}
+
+/**
+ * Whether the window had the focus before the current press. The press that
+ * brings the window to the front arrives right after the focus event, so a
+ * press within the double click time of that event does not count.
+ *
+ * @return  {boolean}  True if the window was focused already
+ */
+function windowHadFocus (): boolean {
+  return document.hasFocus() && Date.now() - lastWindowFocusTime >= SLOW_CLICK_RENAME_DELAY
+}
 
 /**
  * Close a file root path at `path`, including all open
@@ -109,6 +135,34 @@ export function useItemComposable (
   const selectedFile = computed(() => documentTreeStore.lastLeafActiveFile)
   const selectedDir = computed(() => configStore.config.openDirectory)
 
+  // Zettlr-LYH slow click rename (R101): clicking the name of the selected
+  // file once more opens the inline rename field. Directories are left alone.
+  const isSelectedFile = computed(() => obj.value.type !== 'directory' && selectedFile.value?.path === obj.value.path)
+  // The name element of the latest press
+  let slowClickNameElement: HTMLElement|null = null
+
+  const slowClickRename = createSlowClickRename({
+    onRename: () => {
+      if (isSelectedFile.value && !nameEditing.value) {
+        nameEditing.value = true
+      }
+    },
+    onActiveChange: followWindowDuringSlowClick
+  })
+
+  trackWindowFocus()
+
+  // Losing the selection ends a slow click
+  watch(isSelectedFile, selected => {
+    if (!selected) {
+      slowClickRename.cancel()
+    }
+  })
+
+  onBeforeUnmount(() => {
+    slowClickRename.cancel()
+  })
+
   watch(nameEditing, (newVal) => {
     if (!newVal) {
       return // No need to select
@@ -162,7 +216,11 @@ export function useItemComposable (
           path: obj.value.path,
           windowId,
           leafId: documentTreeStore.lastLeafId,
-          newTab: middleClick || (alt && type === 'file') // Force a new tab in this case.
+          newTab: middleClick || (alt && type === 'file'), // Force a new tab in this case.
+          // Zettlr-LYH open-with disk check (R51): an explicit open from the
+          // file manager catches external changes the watcher missed
+          checkAgainstDisk: true,
+          insertAfterActiveTab: true
         }
       } as DocumentManagerIPCAPI)
         .then(() => {
@@ -183,7 +241,7 @@ export function useItemComposable (
         ipcRenderer.invoke('documents-provider', {
           command: 'open-file',
           // We leave leafId undefined
-          payload: { path: obj.value.path, windowId }
+          payload: { path: obj.value.path, windowId, insertAfterActiveTab: true }
         })
           .then(() => {
             configStore.setConfigValue('openDirectory', obj.value.dir)
@@ -256,7 +314,9 @@ export function useItemComposable (
             payload: {
               path: obj.value.path,
               windowId,
-              newTab: true
+              newTab: true,
+              checkAgainstDisk: true, // Zettlr-LYH open-with disk check (R51)
+              insertAfterActiveTab: true
             }
           } as DocumentManagerIPCAPI)
             .catch(e => console.error(e))
@@ -340,7 +400,87 @@ export function useItemComposable (
   }
 
   function updateObject (newObject: AnyDescriptor): void {
+    if (newObject.path !== obj.value.path) {
+      // A recycled list item now shows another file (R101)
+      slowClickRename.cancel()
+    }
     obj.value = newObject
+  }
+
+  /**
+   * A press on the name of a file may become a slow click rename if the file
+   * was selected already (R101).
+   *
+   * @param  {MouseEvent}  event  The mousedown event on the name element
+   */
+  function handleNameMouseDown (event: MouseEvent): void {
+    if (obj.value.type === 'directory' || nameEditing.value) {
+      return
+    }
+
+    slowClickNameElement = event.currentTarget as HTMLElement|null
+    slowClickRename.pointerDown({
+      button: event.button,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+      x: event.clientX,
+      y: event.clientY,
+      wasSelected: isSelectedFile.value,
+      windowFocused: windowHadFocus()
+    })
+  }
+
+  function handleSlowClickMouseMove (event: MouseEvent): void {
+    slowClickRename.pointerMove(event.clientX, event.clientY)
+  }
+
+  /**
+   * Hands the release of the left button to the slow click; it counts as
+   * inside only on the pressed name element.
+   *
+   * @param  {MouseEvent}  event  The mouseup event anywhere in the window
+   */
+  function handleSlowClickMouseUp (event: MouseEvent): void {
+    if (event.button !== 0) {
+      return
+    }
+
+    const inside = slowClickNameElement !== null && slowClickNameElement.contains(event.target as Node|null)
+    slowClickRename.pointerUp(event.clientX, event.clientY, inside)
+  }
+
+  function cancelSlowClickRename (): void {
+    slowClickRename.cancel()
+  }
+
+  /**
+   * Listens to the window while a slow click is being followed: pointer moves
+   * and the release, plus everything that ends it, namely another press, a
+   * key, the start of a drag and the window losing the focus. The press, key
+   * and drag listeners capture, so that a press elsewhere is seen even if it
+   * stops propagation, and so that they do not see the press that has just
+   * added them.
+   *
+   * @param  {boolean}  active  True to start listening, false to stop
+   */
+  function followWindowDuringSlowClick (active: boolean): void {
+    if (active) {
+      window.addEventListener('mousemove', handleSlowClickMouseMove)
+      window.addEventListener('mouseup', handleSlowClickMouseUp)
+      window.addEventListener('mousedown', cancelSlowClickRename, true)
+      window.addEventListener('keydown', cancelSlowClickRename, true)
+      window.addEventListener('dragstart', cancelSlowClickRename, true)
+      window.addEventListener('blur', cancelSlowClickRename)
+    } else {
+      window.removeEventListener('mousemove', handleSlowClickMouseMove)
+      window.removeEventListener('mouseup', handleSlowClickMouseUp)
+      window.removeEventListener('mousedown', cancelSlowClickRename, true)
+      window.removeEventListener('keydown', cancelSlowClickRename, true)
+      window.removeEventListener('dragstart', cancelSlowClickRename, true)
+      window.removeEventListener('blur', cancelSlowClickRename)
+    }
   }
 
   return {
@@ -350,6 +490,7 @@ export function useItemComposable (
     onDragHandler,
     handleContextMenu,
     requestSelection,
+    handleNameMouseDown,
     finishNameEditing,
     isDirectory,
     selectedFile,

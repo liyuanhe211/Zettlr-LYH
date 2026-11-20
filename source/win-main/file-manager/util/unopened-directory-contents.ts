@@ -28,10 +28,10 @@ import type {
   HistoryTreeFolderNode,
   HistoryTreeNode
 } from 'source/common/util/open-history-tree'
+import { compareHistoryTreeNodes, type HistoryTreeNameComparator } from 'source/common/util/open-history-tree'
+import { compareExplorerNames, requestExplorerNameOrder } from './explorer-name-order'
 import { isWin32Path, pathDirname } from 'source/common/util/renderer-path-polyfill'
 import type { FSALEventPayload, FSALEventPayloadChange } from 'source/app/service-providers/fsal'
-
-const ipcRenderer = window.ipc
 
 /**
  * A grey row: the synthesised history tree node that is being rendered plus the
@@ -41,6 +41,13 @@ const ipcRenderer = window.ipc
 export interface UnopenedChild {
   node: HistoryTreeNode
   descriptor: AnyDescriptor
+}
+
+/** A row shared by rendering and keyboard navigation, including its opening behavior. */
+export interface DisplayedHistoryChild {
+  node: HistoryTreeNode
+  unopened: boolean
+  descriptor?: AnyDescriptor
 }
 
 /**
@@ -96,14 +103,16 @@ export function hasDirectoryContents (directoryPath: string): boolean {
  * @param  {string}  directoryPath  The absolute path of the directory
  */
 export function loadDirectoryContents (directoryPath: string): void {
+  ensureDirectoryEvents()
   if (directoryContents.value.has(directoryPath) || directoriesBeingRead.has(directoryPath)) {
     return
   }
 
   directoriesBeingRead.add(directoryPath)
 
-  ipcRenderer.invoke('fsal', { command: 'read-directory', payload: directoryPath })
+  window.ipc.invoke('fsal', { command: 'read-directory', payload: directoryPath })
     .then((children: AnyDescriptor[]) => {
+      requestExplorerNameOrder(children.map(child => child.name))
       directoryContents.value.set(directoryPath, children)
     })
     .catch(error => {
@@ -154,7 +163,8 @@ export function getHistoryChildPaths (node: HistoryTreeFolderNode): Set<string> 
 export function getUnopenedChildren (
   directoryPath: string,
   historyChildPaths: Set<string>,
-  openHistoryPaths: Set<string>
+  openHistoryPaths: Set<string>,
+  compareNames: HistoryTreeNameComparator = compareExplorerNames
 ): UnopenedChild[] {
   const contents = directoryContents.value.get(directoryPath)
 
@@ -179,7 +189,7 @@ export function getUnopenedChildren (
   }
 
   const byName = (one: AnyDescriptor, other: AnyDescriptor): number => {
-    return one.name.localeCompare(other.name, undefined, { numeric: true, sensitivity: 'base' })
+    return compareNames(one.name, other.name)
   }
 
   directories.sort(byName)
@@ -191,10 +201,26 @@ export function getUnopenedChildren (
   }))
 }
 
+/** The actual child rows, sorted together regardless of whether they were opened before. */
+export function getDisplayedHistoryChildren (
+  node: HistoryTreeFolderNode,
+  showUnopenedContent: boolean,
+  openHistoryPaths: Set<string>,
+  filterActive: boolean,
+  compareNames: HistoryTreeNameComparator = compareExplorerNames
+): DisplayedHistoryChild[] {
+  const children: DisplayedHistoryChild[] = node.children.map(child => ({ node: child, unopened: false }))
+  if (showUnopenedContent && !filterActive) {
+    children.push(...getUnopenedChildren(node.path, getHistoryChildPaths(node), openHistoryPaths, compareNames)
+      .map(child => ({ ...child, unopened: true })))
+  }
+  return children.sort((first, second) => compareHistoryTreeNodes(first.node, second.node, compareNames))
+}
+
 /**
  * Turns a descriptor read from disk into the history tree node shape that
- * HistoryTreeItem renders. Grey rows have no meaningful recency, so they sort
- * last everywhere.
+ * HistoryTreeItem renders. Grey rows have no meaningful recency; their display
+ * order is determined by type and name together with the history rows.
  *
  * @param   {AnyDescriptor}    descriptor  The descriptor
  *
@@ -242,7 +268,8 @@ export function collectVisibleRows (
   uncollapsedDirectories: string[],
   directoriesShowingUnopenedContent: string[],
   openHistoryPaths: Set<string>,
-  filterActive: boolean
+  filterActive: boolean,
+  compareNames: HistoryTreeNameComparator = compareExplorerNames
 ): Array<[string, string]> {
   const rows: Array<[string, string]> = []
 
@@ -259,28 +286,19 @@ export function collectVisibleRows (
       return
     }
 
-    for (const child of node.children) {
-      walk(child)
-    }
-
-    // While a filter query is active, the tree only shows matching history
-    // files, so no grey rows are rendered at all.
-    if (filterActive || !directoriesShowingUnopenedContent.includes(node.path)) {
-      return
-    }
-
-    const unopenedChildren = getUnopenedChildren(
-      node.path,
-      getHistoryChildPaths(node),
-      openHistoryPaths
+    const children = getDisplayedHistoryChildren(
+      node,
+      directoriesShowingUnopenedContent.includes(node.path),
+      openHistoryPaths,
+      filterActive,
+      compareNames
     )
-
-    for (const child of unopenedChildren) {
-      walk(child.node, child.descriptor.type)
+    for (const child of children) {
+      walk(child.node, child.descriptor?.type)
     }
   }
 
-  for (const node of nodes) {
+  for (const node of [...nodes].sort((first, second) => compareHistoryTreeNodes(first, second, compareNames))) {
     walk(node)
   }
 
@@ -289,11 +307,19 @@ export function collectVisibleRows (
 
 // Drop cached listings whenever the file system watcher reports a change, so
 // that the grey rows do not go stale over a long running session.
-ipcRenderer.on('fsal-event', (_event, payload: FSALEventPayload) => {
-  const affectedPath = payload.event === 'unlink' || payload.event === 'unlinkDir'
-    ? payload.path
-    : (payload as FSALEventPayloadChange).descriptor.path
+let directoryEventsRegistered = false
 
-  directoryContents.value.delete(affectedPath)
-  directoryContents.value.delete(pathDirname(affectedPath))
-})
+function ensureDirectoryEvents (): void {
+  if (directoryEventsRegistered) {
+    return
+  }
+  window.ipc.on('fsal-event', (_event, payload: FSALEventPayload) => {
+    const affectedPath = payload.event === 'unlink' || payload.event === 'unlinkDir'
+      ? payload.path
+      : (payload as FSALEventPayloadChange).descriptor.path
+
+    directoryContents.value.delete(affectedPath)
+    directoryContents.value.delete(pathDirname(affectedPath))
+  })
+  directoryEventsRegistered = true
+}

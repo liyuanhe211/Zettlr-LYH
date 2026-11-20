@@ -43,7 +43,7 @@
           v-on:blur="nameEditing = false"
           v-on:click.stop=""
         >
-        <span v-else>
+        <span v-else v-on:mousedown="handleNameMouseDown">
           {{ basename }}
         </span>
         <div class="date">
@@ -243,6 +243,7 @@ const {
   onDragHandler,
   handleContextMenu,
   requestSelection,
+  handleNameMouseDown,
   finishNameEditing,
   isDirectory,
   selectedFile,
