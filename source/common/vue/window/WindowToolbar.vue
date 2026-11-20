@@ -4,7 +4,8 @@
     ref="element"
     role="toolbar"
     v-bind:class="{
-      'has-rtl-traffic-lights': hasRTLTrafficLights
+      'has-rtl-traffic-lights': hasRTLTrafficLights,
+      'wrap-controls': wrapControls
     }"
     v-on:dblclick="handleDoubleClick"
     v-on:mousedown="$event.preventDefault()"
@@ -25,6 +26,7 @@
         <ButtonControl
           v-if="item.type === 'button' && item.visible !== false"
           v-bind:key="idx"
+          v-bind:class="{ 'join-previous': joinsPrevious(item) }"
           v-bind:control="item"
           v-bind:show-label="showLabels"
           v-bind:button-text="item.buttonText"
@@ -33,6 +35,7 @@
         <ToggleControl
           v-if="item.type === 'toggle' && item.visible !== false"
           v-bind:key="idx"
+          v-bind:class="{ 'join-previous': joinsPrevious(item) }"
           v-bind:control="item"
           v-bind:show-label="showLabels"
           v-on:toggle="emit('toggle', { id: item.id, state: $event })"
@@ -40,6 +43,7 @@
         <ThreeWayToggle
           v-if="item.type === 'three-way-toggle'"
           v-bind:key="idx"
+          v-bind:class="{ 'join-previous': joinsPrevious(item) }"
           v-bind:control="item"
           v-bind:show-labels="showLabels"
           v-on:toggle="emit('toggle', { id: item.id, state: $event })"
@@ -48,6 +52,7 @@
         <RingControl
           v-if="item.type === 'ring' && item.visible !== false"
           v-bind:key="idx"
+          v-bind:class="{ 'join-previous': joinsPrevious(item) }"
           v-bind:control="item"
           v-bind:show-label="showLabels"
           v-bind:progress-percent="item.progressPercent"
@@ -65,9 +70,23 @@
           v-bind:key="idx"
           v-bind:control="item"
         ></SpacerControl>
+        <SeparatorControl
+          v-if="item.type === 'separator' && item.visible !== false"
+          v-bind:key="idx"
+          v-bind:control="item"
+          v-bind:next-to-text="separatorNextToText(props.controls, idx)"
+        ></SeparatorControl>
+        <DragAdjustControl
+          v-if="item.type === 'drag-adjust' && item.visible !== false"
+          v-bind:key="idx"
+          v-bind:class="{ 'join-previous': joinsPrevious(item) }"
+          v-bind:control="item"
+          v-on:drag="forwardDrag(item, $event)"
+        ></DragAdjustControl>
         <TextControl
           v-if="item.type === 'text' && item.visible !== false"
           v-bind:key="idx"
+          v-bind:class="{ 'join-previous': joinsPrevious(item) }"
           v-bind:control="item"
           v-on:click="emit('click', item.id)"
         ></TextControl>
@@ -115,17 +134,32 @@ import ToggleControl, { type ToolbarToggleControl } from './toolbar-controls/Tog
 import ThreeWayToggle, { type ToolbarThreeWayControl } from './toolbar-controls/ThreeWayToggle.vue'
 import SearchControl, { type ToolbarSearchControl } from './toolbar-controls/SearchControl.vue'
 import SpacerControl, { type ToolbarSpacerControl } from './toolbar-controls/SpacerControl.vue'
+import SeparatorControl, { type ToolbarSeparatorControl } from './toolbar-controls/SeparatorControl.vue'
 import TextControl, { type ToolbarTextControl } from './toolbar-controls/TextControl.vue'
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import DragAdjustControl, { type ToolbarDragAdjustControl, type ToolbarDragUpdate } from './toolbar-controls/DragAdjustControl.vue'
+import { separatorNextToText } from './toolbar-controls/separator-height'
+import { onMounted, onBeforeUnmount, ref, computed } from 'vue'
 import IrisIndicator, { type IrisIndicatorControl } from '../IrisIndicator.vue'
 
 export type ToolbarControl = ToolbarButtonControl|RingProgressButtonControl|
-ToolbarSearchControl|ToolbarSpacerControl|ToolbarTextControl|
-ToolbarThreeWayControl|ToolbarToggleControl|IrisIndicatorControl
+ToolbarSearchControl|ToolbarSpacerControl|ToolbarSeparatorControl|
+ToolbarTextControl|ToolbarThreeWayControl|ToolbarToggleControl|
+IrisIndicatorControl|ToolbarDragAdjustControl
 
 const ipcRenderer = window.ipc
 
-const props = defineProps<{ controls: ToolbarControl[], showLabels?: boolean }>()
+const props = defineProps<{
+  controls: ToolbarControl[]
+  showLabels?: boolean
+  /**
+   * Zettlr-LYH (R77): what happens to controls that do not fit into one row.
+   * 'wrap' moves them onto further rows, 'scroll' keeps one row that scrolls
+   * sideways. Defaults to 'wrap' in the main window and to 'scroll' in every
+   * other window. (A string rather than a boolean, because Vue turns an
+   * absent boolean property into false, which would hide the default.)
+   */
+  overflowMode?: 'wrap'|'scroll'
+}>()
 
 const element = ref<HTMLDivElement|null>(null)
 
@@ -134,9 +168,32 @@ const emit = defineEmits<{
   (e: 'dblclick'): void
   (e: 'toggle', value: { id: string|undefined, state: string|boolean|undefined }): void
   (e: 'search', value: string): void
+  (e: 'drag', value: ToolbarDragUpdate): void
 }>()
 
 const hasRTLTrafficLights = ref<boolean>(false)
+
+/**
+ * Zettlr-LYH (R77): whether this toolbar sits in the main window. Every window
+ * loads its own renderer entry point, whose URL path contains the entry's name
+ * as a folder (main_window, preferences, log_viewer and so on), both on the
+ * development server and in a packaged build.
+ *
+ * @return  {boolean}  True in the main window
+ */
+function isMainWindowDocument (): boolean {
+  return window.location.pathname.split('/').includes('main_window')
+}
+
+// Zettlr-LYH (R77): the main window's toolbar wraps its controls onto further
+// rows when one row is too narrow (user decision 107); other windows keep the
+// single scrolling row.
+const wrapControls = computed<boolean>(() => {
+  if (props.overflowMode !== undefined) {
+    return props.overflowMode === 'wrap'
+  }
+  return isMainWindowDocument()
+})
 
 const scrollArea = ref<HTMLDivElement|null>(null)
 const canScroll = ref(false)
@@ -146,6 +203,12 @@ const canScroll = ref(false)
 const clientWidthTolerance = 5
 
 function checkOverflow () {
+  // A wrapping toolbar never overflows sideways and shows no scroll buttons
+  if (wrapControls.value) {
+    canScroll.value = false
+    return
+  }
+
   if (scrollArea.value) {
     const sa = scrollArea.value
     canScroll.value = sa.scrollWidth > (sa.clientWidth + clientWidthTolerance)
@@ -180,11 +243,47 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', checkOverflow)
 })
 
+/**
+ * Zettlr-LYH (R58): whether a control sits flush against the control before
+ * it. Any control may carry the optional property `joinPrevious: true` (the
+ * control interfaces accept arbitrary extra properties); the toolbar then
+ * gives the control the class join-previous, whose negative left margin
+ * cancels the flex gap of .toolbar-scroll, so that adjacent buttons form one
+ * continuous strip. The `in` check keeps this type safe for every member of
+ * the ToolbarControl union, including those that do not declare the property.
+ *
+ * @param   {ToolbarControl}  control  The control to inspect
+ *
+ * @return  {boolean}                  True if the control joins its predecessor
+ */
+function joinsPrevious (control: ToolbarControl): boolean {
+  return 'joinPrevious' in control && control.joinPrevious === true
+}
+
+/**
+ * Zettlr-LYH (R81): passes a drag update of a drag-adjust control on, both as
+ * the toolbar's drag event and to the control's own onDrag callback. The
+ * callback reaches the owner of the controls even where a window chrome in
+ * between does not forward the drag event.
+ *
+ * @param   {ToolbarDragAdjustControl}  control  The control being dragged
+ * @param   {ToolbarDragUpdate}         update   The drag update
+ */
+function forwardDrag (control: ToolbarDragAdjustControl, update: ToolbarDragUpdate): void {
+  emit('drag', update)
+  control.onDrag?.(update)
+}
+
 function handleDoubleClick (event: MouseEvent): void {
   // Only emit a double click event if the user double clicked on the
-  // _toolbar_ or on a spacer, and not just on any button.
+  // _toolbar_ or on a spacer, and not just on any button. Zettlr-LYH: a
+  // separator line counts as toolbar background as well.
   const t = event.target as HTMLElement|null
-  if (t === element.value || t?.className.includes('spacer') === true) {
+  if (
+    t === element.value ||
+    t?.className.includes('spacer') === true ||
+    t?.classList.contains('toolbar-separator') === true
+  ) {
     emit('dblclick')
   }
 }
@@ -192,6 +291,12 @@ function handleDoubleClick (event: MouseEvent): void {
 
 <style lang="less">
 body div#toolbar {
+  // The space between two adjacent toolbar controls
+  @control-gap: 5px;
+  // The height of one row of controls: the 28 px of the toolbar buttons, which
+  // a single row shows vertically centred in the 40 px toolbar
+  @row-height: 28px;
+
   height: 40px;
   padding: 5px 10px;
   display: flex;
@@ -201,7 +306,7 @@ body div#toolbar {
 
   .toolbar-scroll {
     display: flex;
-    gap: 5px;
+    gap: @control-gap;
     flex: 1;
     overflow-x: auto;
     scrollbar-width: none;
@@ -209,6 +314,30 @@ body div#toolbar {
 
     &::-webkit-scrollbar {
       display: none;
+    }
+
+    // Zettlr-LYH (R58): a control with joinPrevious cancels the gap on its
+    // left and touches the control before it
+    > .join-previous {
+      margin-left: -@control-gap;
+    }
+  }
+
+  // Zettlr-LYH (R77): in a wrapping toolbar the controls flow onto further
+  // rows instead of scrolling sideways. The toolbar keeps its single-row
+  // height as a minimum (the platform blocks below replace the fixed height)
+  // and grows by one row height plus the gap for every further row; the
+  // window chrome is a flex column, so the window content moves down with it.
+  // A single row stays vertically centred exactly as before. Every control
+  // except separators and spacers is at least one row high, so that all rows
+  // are equally high.
+  &.wrap-controls .toolbar-scroll {
+    flex-wrap: wrap;
+    row-gap: @control-gap;
+    overflow-x: visible;
+
+    > :not(.toolbar-separator):not(.spacer) {
+      min-height: @row-height;
     }
   }
 
@@ -269,6 +398,13 @@ body.darwin {
 
     height: @toolbar-height;
     font-size: @font-size;
+
+    // Zettlr-LYH (R77): a wrapping toolbar is at least one row high and grows
+    // with every further row
+    &.wrap-controls {
+      height: auto;
+      min-height: @toolbar-height;
+    }
     background-color: rgb(245, 245, 245);
 
     // Make space for the traffic lights, either on the left side or the right.
@@ -330,6 +466,13 @@ body.win32 {
   div#toolbar {
     height: @toolbar-height;
     font-size: @font-size;
+
+    // Zettlr-LYH (R77): a wrapping toolbar is at least one row high and grows
+    // with every further row
+    &.wrap-controls {
+      height: auto;
+      min-height: @toolbar-height;
+    }
     background-color: rgb(245, 245, 245);
     color: rgb(100, 100, 100);
 
@@ -386,6 +529,13 @@ body.linux {
   div#toolbar {
     height: @toolbar-height;
     font-size: @font-size;
+
+    // Zettlr-LYH (R77): a wrapping toolbar is at least one row high and grows
+    // with every further row
+    &.wrap-controls {
+      height: auto;
+      min-height: @toolbar-height;
+    }
     background-color: rgb(245, 245, 245);
     color: rgb(100, 100, 100);
 
