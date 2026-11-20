@@ -13,11 +13,16 @@
  */
 
 import { app, nativeTheme } from 'electron'
+import path from 'path'
 import * as bcp47 from 'bcp-47'
 import { v4 as uuid4 } from 'uuid'
 import getLanguageFile from '@common/util/get-language-file'
 import type { EditorShortcutName } from 'source/common/modules/markdown-editor/keymaps/shortcuts'
 import { type MenuShortcutName } from '../menu/shortcuts'
+import { JEV_SEARCH_DEFAULT_MAX_CHUNK_CHARACTERS } from '@dts/common/jev-search'
+import { defaultCodeEditingExceptions, type CodeEditingExceptions } from '@common/modules/markdown-editor/util/code-editing-policy'
+import { defaultCopyVisibleTextCategories, type CopyVisibleTextCategories } from '@common/modules/markdown-editor/util/visible-copy-policy'
+import { defaultCharacterPairSettings, type CharacterPairSettings } from '@common/modules/markdown-editor/util/character-pair-policy'
 
 export type MarkdownTheme = 'berlin'|'frankfurt'|'bielefeld'|'karl-marx-stadt'|'bordeaux'
 
@@ -47,7 +52,8 @@ export type ConfigurableEditorShortcuts = Extends<
   'tr-single-quotes-to-double'|'tr-straighten-quotes'|
   'tr-strip-duplicate-spaces'|'tr-title-case'
 >
-export type ConfigurableUIShortcuts = Extends<MenuShortcutName, 'previous-tab'|'next-tab'|'filter-files'>
+// Zettlr-LYH reopen closed tab (R43): adds reopen-closed-tab
+export type ConfigurableUIShortcuts = Extends<MenuShortcutName, 'previous-tab'|'next-tab'|'filter-files'|'reopen-closed-tab'>
 
 /**
  * This type describes an entry of the ignored rules array in the config. We
@@ -73,6 +79,7 @@ export interface LanguageToolIgnoredRuleEntry {
 
 export interface ConfigOptions {
   version: string
+  markdownLineNumbersMigrated: boolean
   buildDate: string
   uuid: string
   appLang: string
@@ -85,13 +92,16 @@ export interface ConfigOptions {
 
   openDirectory: string|null
   attachmentExtensions: string[]
-  alwaysReloadFiles: boolean
   muteLines: boolean
+  // Zettlr-LYH (R128): whether the Formatted mode of TOML files shows table
+  // sections as grids; one switch for all TOML files, windows and panes
+  tomlShowTables: boolean
 
   // NOTE to everyone: These options (and possibly others) that pertain to the
   // file manager should slowly be migrated into the fileManager group below.
   fileManagerMode: 'thin'|'combined'|'expanded'
   fileManagerShowFiles: boolean
+  fileManagerShowOnlyOpenTabs: boolean
   fileManagerShowWorkspaces: boolean
   fileMeta: boolean
   fileMetaTime: 'modtime'|'creationtime'
@@ -109,6 +119,15 @@ export interface ConfigOptions {
 
   newFileNamePattern: string
   newFileDontPrompt: boolean
+  // Folder that receives the scratch notes created with Ctrl+N
+  scratchNotesDirectory: string
+  // Folder that receives the undo history on disk (R135); empty means the default
+  undoHistoryDirectory: string
+  // Semantic search over the active document with TypeSafe's Jev model
+  jevSearch: {
+    apiKey: string // Empty: fall back to the TYPESAFE_API_KEY environment variable
+    maxChunkCharacters: number
+  }
   selectedDicts: string[]
 
   debug: boolean
@@ -158,9 +177,20 @@ export interface ConfigOptions {
     autoSave: 'off'|'immediately'|'delayed'
     citeStyle: 'in-text'|'in-text-suffix'|'regular'
     autoCloseBrackets: boolean
+    autoCloseCharacterPairs: CharacterPairSettings
     showLinkPreviews: boolean
     showStatusbar: boolean
     showFormattingToolbar: boolean
+    /**
+     * Zettlr-LYH (R84, spec C10): Whether edits in the Markdown editors are
+     * recorded as tracked insertions and deletions; shared by all editors
+     */
+    trackChanges: boolean
+    /**
+     * Zettlr-LYH (R84, spec C10): The author name recorded with every tracked
+     * change; empty until the user enters one
+     */
+    revisionAuthor: string
     showWhitespace: boolean
     showMarkdownLineNumbers: boolean
     defaultSaveImagePath: string
@@ -169,6 +199,7 @@ export interface ConfigOptions {
     indentWithTabs: boolean
     alwaysIndentLineOnTab: boolean
     fontSize: number
+    lineNumberFontSize: number
     countChars: boolean
     inputMode: 'default'|'vim'|'emacs'
     boldFormatting: '**'|'__'
@@ -209,8 +240,99 @@ export interface ConfigOptions {
     hideToolbarInDistractionFree: boolean
     markdownFileExtensions: boolean
     previewModeShowSyntaxWhenCursorIsAdjacent: boolean
+    editCodeWhenClicked: boolean
+    codeEditingExceptions: CodeEditingExceptions
+    /**
+     * Zettlr-LYH (R84, spec C10): Whether tracked changes are shown; when off,
+     * the editors show the text as if all changes were accepted
+     */
+    showRevisions: boolean
+    copyVisibleTextCategories: CopyVisibleTextCategories
     imageWidth: number
     imageHeight: number
+    /**
+     * Zettlr-LYH (R64): Indentation of rendered blockquotes on the left and on
+     * the right, in em
+     */
+    blockquoteIndent: number
+    /**
+     * Zettlr-LYH (R64): Background color (`#rrggbb`) of rendered blockquotes in
+     * light mode
+     */
+    blockquoteBackgroundLight: string
+    /**
+     * Zettlr-LYH (R64): Whether rendered blockquotes have no background in
+     * light mode (the color is kept for when this is turned off again)
+     */
+    blockquoteBackgroundLightTransparent: boolean
+    /**
+     * Zettlr-LYH (R64): Background color (`#rrggbb`) of rendered blockquotes in
+     * dark mode
+     */
+    blockquoteBackgroundDark: string
+    /**
+     * Zettlr-LYH (R64): Whether rendered blockquotes have no background in dark
+     * mode (the color is kept for when this is turned off again)
+     */
+    blockquoteBackgroundDarkTransparent: boolean
+    /**
+     * Zettlr-LYH: Size of level-1 headings relative to the body text
+     */
+    headingSize1: number
+    /**
+     * Zettlr-LYH: Whether level-1 headings are bold
+     */
+    headingBold1: boolean
+    /**
+     * Zettlr-LYH: Size of level-2 headings relative to the body text
+     */
+    headingSize2: number
+    /**
+     * Zettlr-LYH: Whether level-2 headings are bold
+     */
+    headingBold2: boolean
+    /**
+     * Zettlr-LYH: Size of level-3 headings relative to the body text
+     */
+    headingSize3: number
+    /**
+     * Zettlr-LYH: Whether level-3 headings are bold
+     */
+    headingBold3: boolean
+    /**
+     * Zettlr-LYH: Size of level-4 headings relative to the body text
+     */
+    headingSize4: number
+    /**
+     * Zettlr-LYH: Whether level-4 headings are bold
+     */
+    headingBold4: boolean
+    /**
+     * Zettlr-LYH: Size of level-5 headings relative to the body text
+     */
+    headingSize5: number
+    /**
+     * Zettlr-LYH: Whether level-5 headings are bold
+     */
+    headingBold5: boolean
+    /**
+     * Zettlr-LYH: Size of level-6 headings relative to the body text
+     */
+    headingSize6: number
+    /**
+     * Zettlr-LYH: Whether level-6 headings are bold
+     */
+    headingBold6: boolean
+    /**
+     * Zettlr-LYH (R81): Left and right margin of the Markdown editors, in
+     * pixels, while the editor area shows a single pane
+     */
+    editorMarginSingle: number
+    /**
+     * Zettlr-LYH (R81): Left and right margin of the Markdown editors, in
+     * pixels, while the editor area is split into two or more panes
+     */
+    editorMarginSplit: number
     renderingMode: 'preview'|'raw'
     renderCitations: boolean
     renderIframes: boolean
@@ -248,6 +370,8 @@ export interface ConfigOptions {
     sidebarVisible: boolean
     fileManagerVisible: boolean
     currentSidebarTab: 'toc'|'references'|'relatedFiles'|'attachments'
+    tocMaxHeadingLevel: number
+    tocWrapHeadings: boolean
     recentGlobalSearches: string[]
   }
   ui: {
@@ -258,6 +382,7 @@ export interface ConfigOptions {
     deleteOnFail: boolean
     leaveAppRunning: boolean
     avoidNewTabs: boolean
+    maxOpenTabs: number
     iframeWhitelist: string[]
     checkForUpdates: boolean
     zoomBehavior: 'gui'|'editor'
@@ -300,6 +425,7 @@ export function getConfigTemplate (): ConfigOptions {
   // Return the complete configuration object
   return {
     version: app.getVersion(), // Useful for migrating
+    markdownLineNumbersMigrated: false,
     buildDate: __BUILD_DATE__,
     app: {
       openFiles: [],
@@ -321,6 +447,9 @@ export function getConfigTemplate (): ConfigOptions {
       fileManagerVisible: true,
       sidebarVisible: false,
       currentSidebarTab: 'toc',
+      // Deepest heading level shown in the sidebar table of contents (1-6)
+      tocMaxHeadingLevel: 6,
+      tocWrapHeadings: true,
       recentGlobalSearches: []
     },
     ui: {
@@ -332,7 +461,6 @@ export function getConfigTemplate (): ConfigOptions {
     // UI related options
     darkMode: nativeTheme.shouldUseDarkColors,
     darkModeEditor: 'match', // Possible values: 'match', 'light', 'dark'
-    alwaysReloadFiles: true, // Should Zettlr automatically load remote changes?
     autoDarkMode: 'system', // Possible values: 'off', 'system', 'schedule', 'auto'
     autoDarkModeStart: '21:00', // Switch into dark mode at this time
     autoDarkModeEnd: '06:00', // Switch to light mode at this time
@@ -341,9 +469,11 @@ export function getConfigTemplate (): ConfigOptions {
     sorting: 'natural', // Can be natural or based on ASCII values
     sortFoldersFirst: true, // should folders be shown first in combined fileview
     muteLines: true, // Should the editor mute lines in distraction free mode?
+    tomlShowTables: false, // Zettlr-LYH (R128): Show table sections of TOML files as grids in the Formatted mode?
     fileManagerMode: 'combined', // thin = Preview or directories visible --- expanded = both visible --- combined = tree view displays also files
     fileManagerShowFiles: true, // Allow users to persistently collapse or uncollapse the files and workspaces sections.
     fileManagerShowWorkspaces: true,
+    fileManagerShowOnlyOpenTabs: false, // Zettlr-LYH (R87): the Files section lists only the folders of this window's open tabs
     fileNameDisplay: 'filename', // Controls what info is displayed as filenames
     fileManager: {
       twoStepCollapseWorkspaces: false,
@@ -351,6 +481,19 @@ export function getConfigTemplate (): ConfigOptions {
     },
     newFileNamePattern: '%id.md',
     newFileDontPrompt: false, // If true immediately creates files
+    // Scratch notes created with Ctrl+N live here until they are saved; an
+    // empty value falls back to this default folder at runtime.
+    // (R135: Zettlr\__Unsaved inside the documents folder; written out here
+    // rather than imported, since tests load this file with stand-ins for
+    // each of its imports.)
+    scratchNotesDirectory: path.join(app.getPath('documents'), 'Zettlr', '__Unsaved'),
+    // Undo history folder (R135); empty means the folder Zettlr\__History
+    // inside the documents folder.
+    undoHistoryDirectory: '',
+    jevSearch: {
+      apiKey: '', // Empty: fall back to the TYPESAFE_API_KEY environment variable
+      maxChunkCharacters: JEV_SEARCH_DEFAULT_MAX_CHUNK_CHARACTERS
+    },
     export: {
       dir: 'temp', // Can either be "temp", "cwd" (current working directory) or "ask"
       stripTags: false, // Strip tags a.k.a. #tag
@@ -386,9 +529,10 @@ export function getConfigTemplate (): ConfigOptions {
       autocompleteWithEnter: false,
       autocompleteWithTab: true,
       autoCloseBrackets: true,
+      autoCloseCharacterPairs: { ...defaultCharacterPairSettings },
       showLinkPreviews: true, // Whether to fetch link previews in the editor
       showWhitespace: false,
-      showMarkdownLineNumbers: false,
+      showMarkdownLineNumbers: true,
       defaultSaveImagePath: '',
       citeStyle: 'regular', // Determines how autocomplete will complete citations
       enableTableHelper: true, // Enable the table helper plugin
@@ -396,6 +540,7 @@ export function getConfigTemplate (): ConfigOptions {
       indentWithTabs: false,
       alwaysIndentLineOnTab: false, // Whether `Tab` always indents the current line
       fontSize: 18, // The editor's font size in pixels
+      lineNumberFontSize: 0, // Zero follows the editor font size minus two pixels
       countChars: false, // Set to true to enable counting characters instead of words
       inputMode: 'default', // Can be default, vim, emacs
       boldFormatting: '**', // Can be ** or __
@@ -404,6 +549,8 @@ export function getConfigTemplate (): ConfigOptions {
       readabilityAlgorithm: 'dale-chall', // The algorithm to use with readability mode.
       showStatusbar: true,
       showFormattingToolbar: true,
+      trackChanges: false, // Record edits as tracked changes (R84)
+      revisionAuthor: '', // Author name of tracked changes, asked for when empty (R84)
       lint: {
         markdown: true, // Should Markdown be linted?
         languageTool: {
@@ -498,8 +645,31 @@ export function getConfigTemplate (): ConfigOptions {
       hideToolbarInDistractionFree: false,
       markdownFileExtensions: false,
       previewModeShowSyntaxWhenCursorIsAdjacent: true,
+      editCodeWhenClicked: false,
+      codeEditingExceptions: { ...defaultCodeEditingExceptions },
+      showRevisions: true, // Show tracked changes rather than the accepted text (R84)
+      copyVisibleTextCategories: { ...defaultCopyVisibleTextCategories },
       imageWidth: 100, // Maximum preview image width
       imageHeight: 50, // Maximum preview image height
+      blockquoteIndent: 2, // Left and right indentation of blockquotes in em
+      blockquoteBackgroundLight: '#f3f3f3',
+      blockquoteBackgroundLightTransparent: false,
+      blockquoteBackgroundDark: '#2b2b2b',
+      blockquoteBackgroundDarkTransparent: false,
+      headingSize1: 2, // Size of level-1 headings relative to the body text
+      headingBold1: true,
+      headingSize2: 1.8, // Size of level-2 headings relative to the body text
+      headingBold2: true,
+      headingSize3: 1.5, // Size of level-3 headings relative to the body text
+      headingBold3: true,
+      headingSize4: 1.3, // Size of level-4 headings relative to the body text
+      headingBold4: true,
+      headingSize5: 1, // Size of level-5 headings relative to the body text
+      headingBold5: true,
+      headingSize6: 1, // Size of level-6 headings relative to the body text
+      headingBold6: true,
+      editorMarginSingle: 50, // Left and right margin of the editor text with a single pane, in px (R81)
+      editorMarginSplit: 50, // Left and right margin of the editor text with split panes, in px (R81)
       renderingMode: 'preview',
       renderCitations: true,
       renderIframes: true,
@@ -534,6 +704,7 @@ export function getConfigTemplate (): ConfigOptions {
       deleteOnFail: false, // Whether to delete files if trashing them fails
       leaveAppRunning: false, // Whether to leave app running in the notification area (tray)
       avoidNewTabs: false, // Whether to avoid opening new tabs for documents if possible
+      maxOpenTabs: 0, // Maximum saved, unpinned tabs per window; zero is unlimited
       iframeWhitelist: [ 'www.youtube.com', 'player.vimeo.com' ], // Contains a list of whitelisted iFrame prerendering domains
       checkForUpdates: true,
       zoomBehavior: 'gui' // Used to determine what gets zoomed: The GUI or the editor
@@ -558,7 +729,8 @@ export function getConfigTemplate (): ConfigOptions {
       ui: {
         'next-tab': '',
         'previous-tab': '',
-        'filter-files': ''
+        'filter-files': '',
+        'reopen-closed-tab': '' // Zettlr-LYH reopen closed tab (R43)
       },
       editor: {
         'table-align': '',

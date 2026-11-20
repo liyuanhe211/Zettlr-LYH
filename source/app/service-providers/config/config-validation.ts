@@ -13,6 +13,9 @@
  */
 
 import { trans } from '@common/i18n-main'
+import { codeEditingCategoryLabels, defaultCodeEditingExceptions } from '@common/modules/markdown-editor/util/code-editing-policy'
+import { copyVisibleTextCategoryLabels, defaultCopyVisibleTextCategories } from '@common/modules/markdown-editor/util/visible-copy-policy'
+import { defaultCharacterPairSettings, isCharacterPairSettingsUpdate } from '@common/modules/markdown-editor/util/character-pair-policy'
 
 const RULES = {
   darkMode: 'required|boolean|default:false',
@@ -23,7 +26,9 @@ const RULES = {
   newFileNamePattern: 'required|string|default:%id.md',
   appLang: 'required|string|min:5|max:7|default:en_US',
   fileManagerMode: 'required|string|in:thin,expanded,combined|default:thin',
+  fileManagerShowOnlyOpenTabs: 'required|boolean|default:false',
   muteLines: 'required|boolean|default:false',
+  tomlShowTables: 'required|boolean|default:false',
   'export.dir': 'required|string|in:temp,cwd|default:temp',
   'export.stripTags': 'required|boolean|default:false',
   'export.stripLinks': 'required|string|in:full,unlink,no|default:full',
@@ -31,15 +36,56 @@ const RULES = {
   'zkn.idGen': 'required|string|min:2|default:',
   attachmentExtensions: 'optional|array',
   debug: 'required|boolean|default:false',
-  title: 'required|string|default:',
+  'system.maxOpenTabs': 'required|nonnegative-safe-integer|default:0',
   'editor.indentUnit': 'required|number|min:1|max:24',
   'editor.boldFormatting': 'required|string|in:__,**|default:**',
   'editor.italicFormatting': 'required|string|in:_,*|default:_',
   'editor.readabilityAlgorithm': 'required|string|in:dale-chall,gunning-fog,coleman-liau,automated-readability|default:dale-chall',
-  cslLibrary: 'optional|string|default:',
+  'editor.autoCloseCharacterPairs': 'required|character-pair-settings',
+  ...Object.fromEntries(Object.entries(defaultCharacterPairSettings).map(([ pair, enabled ]) => [
+    `editor.autoCloseCharacterPairs.${pair}`, `required|boolean|default:${String(enabled)}`
+  ])),
+  'export.cslLibrary': 'optional|string|default:',
+  // Zettlr-LYH (R135): the undo history folder; empty means the default folder
+  undoHistoryDirectory: 'optional|string|default:',
   'display.imageWidth': 'required|number|min:1|max:100|default:100',
   'display.imageHeight': 'required|number|min:1|max:100|default:100',
-  'watchdog.stabilityThreshold': 'optional|number|min:1|max:100000|default:1000'
+  'display.editCodeWhenClicked': 'required|boolean|default:false',
+  'display.codeEditingExceptions': 'required|code-editing-exceptions',
+  // Zettlr-LYH (R84, spec C10): the revision mode settings. The author name
+  // is optional because it is empty until the user enters one.
+  'editor.trackChanges': 'required|boolean|default:false',
+  'display.showRevisions': 'required|boolean|default:true',
+  'editor.revisionAuthor': 'optional|string|default:',
+  'display.copyVisibleTextCategories': 'required|copy-visible-text-categories',
+  ...Object.fromEntries(Object.entries(defaultCopyVisibleTextCategories).map(([ category, enabled ]) => [
+    `display.copyVisibleTextCategories.${category}`, `required|boolean|default:${String(enabled)}`
+  ])),
+  ...Object.fromEntries(Object.entries(defaultCodeEditingExceptions).map(([ category, enabled ]) => [
+    `display.codeEditingExceptions.${category}`, `required|boolean|default:${String(enabled)}`
+  ])),
+  'display.blockquoteIndent': 'required|number|min:0|max:10|default:2',
+  'display.blockquoteBackgroundLight': 'required|string|min:7|max:7|default:#f3f3f3',
+  'display.blockquoteBackgroundLightTransparent': 'required|boolean|default:false',
+  'display.blockquoteBackgroundDark': 'required|string|min:7|max:7|default:#2b2b2b',
+  'display.blockquoteBackgroundDarkTransparent': 'required|boolean|default:false',
+  'display.headingSize1': 'required|number|min:0.5|max:5|default:2',
+  'display.headingBold1': 'required|boolean|default:true',
+  'display.headingSize2': 'required|number|min:0.5|max:5|default:1.8',
+  'display.headingBold2': 'required|boolean|default:true',
+  'display.headingSize3': 'required|number|min:0.5|max:5|default:1.5',
+  'display.headingBold3': 'required|boolean|default:true',
+  'display.headingSize4': 'required|number|min:0.5|max:5|default:1.3',
+  'display.headingBold4': 'required|boolean|default:true',
+  'display.headingSize5': 'required|number|min:0.5|max:5|default:1',
+  'display.headingBold5': 'required|boolean|default:true',
+  'display.headingSize6': 'required|number|min:0.5|max:5|default:1',
+  'display.headingBold6': 'required|boolean|default:true',
+  'display.editorMarginSingle': 'required|number|min:0|max:2000|default:50',
+  'display.editorMarginSplit': 'required|number|min:0|max:2000|default:50',
+  'window.tocMaxHeadingLevel': 'required|number|min:1|max:6|default:6',
+  'window.tocWrapHeadings': 'required|boolean|default:true',
+  'watchdog.stabilityThreshold':'optional|number|min:1|max:100000|default:1000'
 }
 
 export const VALIDATE_RULES = Object.values(RULES)
@@ -117,7 +163,7 @@ export class ValidationRule {
         this._isRequired = true
       } else if (rule === 'optional') {
         this._isRequired = false
-      } else if ([ 'boolean', 'string', 'number', 'array' ].includes(rule)) {
+      } else if ([ 'boolean', 'string', 'number', 'array', 'code-editing-exceptions', 'copy-visible-text-categories', 'character-pair-settings', 'nonnegative-safe-integer' ].includes(rule)) {
         this._type = rule
       } else if (rule.startsWith('min:')) {
         const minValue = rule.split(':')[1]
@@ -248,6 +294,20 @@ export class ValidationRule {
       return true
     } else if (this._type === 'array') {
       return Array.isArray(this._input)
+    } else if (this._type === 'nonnegative-safe-integer') {
+      return typeof this._input === 'number' && Number.isSafeInteger(this._input) && this._input >= 0
+    } else if (this._type === 'character-pair-settings') {
+      return isCharacterPairSettingsUpdate(this._input)
+    } else if (this._type === 'code-editing-exceptions') {
+      // Partial dictionaries are valid: safeAssign fills missing categories
+      // from the shared defaults when loading or updating configuration.
+      return this._input !== null && typeof this._input === 'object' &&
+        !Array.isArray(this._input) && Object.entries(this._input).every(([ category, enabled ]) =>
+        Object.prototype.hasOwnProperty.call(codeEditingCategoryLabels, category) && typeof enabled === 'boolean')
+    } else if (this._type === 'copy-visible-text-categories') {
+      return this._input !== null && typeof this._input === 'object' &&
+        !Array.isArray(this._input) && Object.entries(this._input).every(([ category, enabled ]) =>
+        Object.prototype.hasOwnProperty.call(copyVisibleTextCategoryLabels, category) && typeof enabled === 'boolean')
     } else {
       return typeof this._input === this._type
     }

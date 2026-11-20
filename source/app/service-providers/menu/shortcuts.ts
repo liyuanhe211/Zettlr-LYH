@@ -25,7 +25,7 @@ import { type ConfigOptions } from '../config/get-config-template'
  * 5. Add it to a section in the preferences.
  */
 
-export type MenuShortcutName = 'previous-tab'|'next-tab'|'filter-files'
+export type MenuShortcutName = 'previous-tab'|'next-tab'|'filter-files'|'reopen-closed-tab'
 
 /**
  * Default keybindings for all commands. May be empty (in which case there is no
@@ -34,7 +34,10 @@ export type MenuShortcutName = 'previous-tab'|'next-tab'|'filter-files'
 export const defaultKeybindings: Record<MenuShortcutName, DefaultShortcut> = {
   'previous-tab': { key: 'Ctrl-Shift-Tab' },
   'next-tab': { key: 'Ctrl-Tab' },
-  'filter-files': { key: 'Mod-Shift-t' }
+  // Zettlr-LYH reopen closed tab (R43): Mod-Shift-t now reopens closed tabs,
+  // so filtering files moves to Mod-Shift-e
+  'filter-files': { key: 'Mod-Shift-e' },
+  'reopen-closed-tab': { key: 'Mod-Shift-t' }
 }
 
 /**
