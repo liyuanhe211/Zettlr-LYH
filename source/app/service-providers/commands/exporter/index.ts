@@ -7,7 +7,11 @@
  * Maintainer:      Hendrik Erz
  * License:         GNU GPL v3
  *
- * Description:     This module allows exporting files with Pandoc.
+ * Description:     This module allows exporting files with Pandoc. Tracked
+ *                  changes (spec C10) are handed to Pandoc unchanged for docx,
+ *                  which turns them into Word revisions; for every other
+ *                  format, the Markdown is exported with all revisions
+ *                  accepted.
  *
  * END HEADER
  */
@@ -33,6 +37,9 @@ import { type PandocProfileMetadata } from '@providers/assets'
 import type ConfigProvider from '@providers/config'
 import { enableExtension, parseReaderWriter, readerWriterToString } from '@common/pandoc-util/parse-reader-writer'
 import { supportsExtension } from 'source/common/pandoc-util/pandoc-extensions'
+import { hasMarkdownExt } from '@common/util/file-extention-checks'
+import { acceptAllRevisions } from '@common/modules/markdown-editor/revisions/revision-model'
+import { mayContainRevisions } from '@common/modules/markdown-utils/standalone-html-export'
 import { resolveShortcutImagesInSourceFiles } from './resolve-shortcut-images'
 import { resolveShortcutTarget } from 'source/app/util/windows-shortcut'
 
@@ -67,6 +74,102 @@ export function getCustomProfiles (): PandocProfileMetadata[] {
   ]
 }
 
+/**
+ * The writers that receive the tracked changes unchanged: docx, where Pandoc
+ * turns them into Word revisions (spec C10, export item 1), and the Textbundle
+ * and Textpack containers, which package the Markdown source itself instead
+ * of converting it.
+ */
+const REVISION_KEEPING_CUSTOM_WRITERS = [ 'textbundle', 'textpack' ]
+const REVISION_KEEPING_PANDOC_WRITERS = ['docx']
+
+/**
+ * Whether an export with the given writer keeps the tracked changes as they
+ * are written in the Markdown.
+ *
+ * @param   {string}   writer  The writer of the export profile, such as
+ *                             "docx", "docx+styles", "html5" or "simple-pdf"
+ *
+ * @return  {boolean}          True for docx, Textbundle and Textpack
+ */
+export function keepsRevisionMarkup (writer: string): boolean {
+  if (REVISION_KEEPING_CUSTOM_WRITERS.includes(writer)) {
+    return true
+  }
+
+  if (writer === 'simple-pdf') {
+    return false
+  }
+
+  return REVISION_KEEPING_PANDOC_WRITERS.includes(parseReaderWriter(writer).name)
+}
+
+/**
+ * Prepares the Markdown of one source file for an export with the given
+ * writer: unchanged where the tracked changes are kept, otherwise with all
+ * revisions accepted (spec C10, export items 1 and 3).
+ *
+ * @param   {string}  markdown  The Markdown text
+ * @param   {string}  writer    The writer of the export profile
+ *
+ * @return  {string}            The text to hand to the exporter
+ */
+export function prepareMarkdownForExport (markdown: string, writer: string): string {
+  if (keepsRevisionMarkup(writer) || !mayContainRevisions(markdown)) {
+    return markdown
+  }
+
+  return acceptAllRevisions(markdown)
+}
+
+/**
+ * Replaces every Markdown source file that contains tracked changes by a
+ * temporary copy with all revisions accepted, unless the writer keeps them.
+ * The copies keep their file names and live in a fresh temporary directory,
+ * one subdirectory per file; the export runs in the document's directory, so
+ * relative paths keep working as with the unchanged files.
+ *
+ * @param   {string[]}  inputFiles  The source files
+ * @param   {string}    writer      The writer of the export profile
+ *
+ * @return  {Promise<{ inputFiles: string[], temporaryDirectory: string|undefined }>}
+ *                                  The files to export and the directory to
+ *                                  delete afterwards, if one was created
+ */
+async function acceptRevisionsInSourceFiles (inputFiles: string[], writer: string): Promise<{ inputFiles: string[], temporaryDirectory: string|undefined }> {
+  if (keepsRevisionMarkup(writer)) {
+    return { inputFiles, temporaryDirectory: undefined }
+  }
+
+  let temporaryDirectory: string|undefined
+  const preparedFiles: string[] = []
+  for (const [ index, inputFile ] of inputFiles.entries()) {
+    if (!hasMarkdownExt(inputFile)) {
+      preparedFiles.push(inputFile)
+      continue
+    }
+
+    const markdown = await fs.readFile(inputFile, 'utf8')
+    const prepared = prepareMarkdownForExport(markdown, writer)
+    if (prepared === markdown) {
+      preparedFiles.push(inputFile)
+      continue
+    }
+
+    if (temporaryDirectory === undefined) {
+      temporaryDirectory = await fs.mkdtemp(path.join(app.getPath('temp'), 'zettlr-accepted-revisions-'))
+    }
+
+    const fileDirectory = path.join(temporaryDirectory, String(index))
+    await fs.mkdir(fileDirectory, { recursive: true })
+    const preparedFile = path.join(fileDirectory, path.basename(inputFile))
+    await fs.writeFile(preparedFile, prepared, { encoding: 'utf8' })
+    preparedFiles.push(preparedFile)
+  }
+
+  return { inputFiles: preparedFiles, temporaryDirectory }
+}
+
 const PLUGINS = {
   pandoc: DefaultExporter,
   'simple-pdf': PDFExporter,
@@ -87,14 +190,22 @@ export async function makeExport (
   config: ConfigProvider,
   assets: AssetsProvider
 ): Promise<ExporterOutput> {
-  const inputFiles = options.sourceFiles.map(file => file.path)
+  // Tracked changes are accepted in copies of the source files unless the
+  // writer keeps them (spec C10, export items 1 and 3)
+  const { inputFiles, temporaryDirectory } = await acceptRevisionsInSourceFiles(
+    options.sourceFiles.map(file => file.path),
+    options.profile.writer
+  )
+  if (temporaryDirectory !== undefined) {
+    logger.info(`[Exporter] Exporting with all tracked changes accepted (writer ${options.profile.writer})`)
+  }
 
   // Markdown images that link a Windows shortcut (.lnk) are exported with the
   // image the shortcut points to: the links are rewritten in temporary copies
-  // of the source files. The image addresses are relative to the working
-  // directory of Pandoc. An unsaved document is exported from a temporary
-  // copy, so the folder of the original source file is used where there is no
-  // working directory.
+  // of the source files, made after the revisions were accepted. The image
+  // addresses are relative to the working directory of Pandoc. An unsaved
+  // document is exported from a temporary copy, so the folder of the original
+  // source file is used where there is no working directory.
   const shortcutBaseDirectories = new Map<string, string>(inputFiles.map((file, index): [ string, string ] => {
     return [ file, options.cwd ?? path.dirname(options.sourceFiles[index].path) ]
   }))
@@ -122,6 +233,12 @@ export async function makeExport (
         logger.warning(`[Exporter] Could not delete the temporary directory ${shortcutTemporaryDirectory}`, error)
       })
     }
+
+    if (temporaryDirectory !== undefined) {
+      await fs.rm(temporaryDirectory, { recursive: true, force: true }).catch((error: unknown) => {
+        logger.warning(`[Exporter] Could not delete the temporary directory ${temporaryDirectory}`, error)
+      })
+    }
   }
 }
 
@@ -135,7 +252,6 @@ async function runExporterPlugin (
   config: ConfigProvider,
   assets: AssetsProvider
 ): Promise<ExporterOutput> {
-
   // This is basically the "plugin API"
   const ctx: ExporterAPI = {
     runPandoc: async (defaults: string) => {

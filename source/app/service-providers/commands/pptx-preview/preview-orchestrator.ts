@@ -18,7 +18,9 @@
  *                  ambiguous batches split in half recursively and failed
  *                  batches marked as errors without stopping the cycle. The
  *                  full preview state is (re-)published after planning and
- *                  after every finished batch. All side-effect dependencies
+ *                  after every finished batch. Tracked changes (spec C10)
+ *                  are accepted before the document is split, so deleted
+ *                  text never reaches a slide. All side-effect dependencies
  *                  (worker client, content fetching, publishing, filesystem)
  *                  are injected so the scheduler is unit-testable without
  *                  Electron, a real worker, or a real disk.
@@ -32,6 +34,8 @@ import fs from 'fs'
 import { splitPandocSlides, extractReferencedImagePaths } from '@common/util/pandoc-slide-splitter'
 import { normalizeChunkForCacheKey } from '@common/util/pandoc-chunk-normalization'
 import { parsePptxPreviewConfiguration } from '@common/pandoc-util/pptx-preview-configuration'
+import { acceptAllRevisions } from '@common/modules/markdown-editor/revisions/revision-model'
+import { mayContainRevisions } from '@common/modules/markdown-utils/standalone-html-export'
 import type { PandocSlideChunk } from '@common/util/pandoc-slide-splitter'
 import type { PptxPreviewOverflowEntry, PptxPreviewSlide, PptxPreviewState, PptxPreviewUndersizedEntry } from '@dts/common/pptx-preview'
 import { WorkerStartError, normalizeWorkerFindings } from './worker-client'
@@ -249,6 +253,18 @@ export function planBatches<ChunkType extends { kind: 'metadata'|'slide' }> (
   return batches
 }
 
+/**
+ * Returns the Markdown text the preview converts: the document with all
+ * tracked changes accepted (spec C10, export item 3).
+ *
+ * @param   {string}  markdown  The document text
+ *
+ * @return  {string}            The text to split and convert
+ */
+export function prepareMarkdownForPptx (markdown: string): string {
+  return mayContainRevisions(markdown) ? acceptAllRevisions(markdown) : markdown
+}
+
 export class PptxPreviewOrchestrator {
   private readonly sessions = new Map<string, PreviewSession>()
   /**
@@ -367,7 +383,7 @@ export class PptxPreviewOrchestrator {
 
     let content: string
     try {
-      content = await this.options.fetchContent(session.filePath)
+      content = prepareMarkdownForPptx(await this.options.fetchContent(session.filePath))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.publishState(session, `Could not read the document: ${message}`)

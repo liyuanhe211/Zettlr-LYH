@@ -76,6 +76,20 @@ export type AssetsProviderIPCAPI = IPCAPI<{
   'list-snippets': unknown
 }>
 
+/**
+ * Returns true if the file is empty or consists only of zero bytes, which is
+ * what an unexpected shutdown can leave behind on NTFS (see "ZETTLR-LYH SAFE
+ * SAVE" in @common/util/write-file-safely). Such a copy must be replaced.
+ *
+ * @param   {string}            filePath  The file to check
+ *
+ * @return  {Promise<boolean>}            Whether the file holds no real content
+ */
+async function isZeroFilled (filePath: string): Promise<boolean> {
+  const contents = await fs.readFile(filePath)
+  return contents.every(byte => byte === 0)
+}
+
 export default class AssetsProvider extends ProviderContract {
   /**
    * Holds the path where defaults files can be found.
@@ -190,6 +204,10 @@ export default class AssetsProvider extends ProviderContract {
       const absolutePath = path.join(this._defaultsPath, file)
       try {
         await fs.lstat(absolutePath)
+        if (await isZeroFilled(absolutePath)) {
+          this._logger.warning(`[Assets Provider] Defaults file ${file} contains only zero bytes (probably damaged by a crash). Copying ...`)
+          await fs.copyFile(path.join(__dirname, './assets/defaults', file), absolutePath)
+        }
       } catch (err) {
         this._logger.warning(`[Assets Provider] Required defaults file ${file} not found. Copying ...`)
         await fs.copyFile(path.join(__dirname, './assets/defaults', file), absolutePath)
@@ -207,8 +225,8 @@ export default class AssetsProvider extends ProviderContract {
         // that the filter shipped with this version is newer. If so, replace.
         const existingStat = await fs.lstat(absolutePath)
         const newStat = await fs.lstat(path.join(__dirname, './assets/lua-filter', file))
-        if (newStat.mtimeMs > existingStat.mtimeMs) {
-          this._logger.warning(`[Assets Provider] Found outdated filter ${file}; copying ...`)
+        if (newStat.mtimeMs > existingStat.mtimeMs || await isZeroFilled(absolutePath)) {
+          this._logger.warning(`[Assets Provider] Found outdated or damaged filter ${file}; copying ...`)
           await fs.copyFile(path.join(__dirname, './assets/lua-filter', file), absolutePath)
         }
       } catch (err) {
