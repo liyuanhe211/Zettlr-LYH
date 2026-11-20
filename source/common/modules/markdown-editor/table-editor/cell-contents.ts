@@ -50,7 +50,8 @@ const renderedCellContents = new WeakMap<HTMLElement, RenderedCellContents>()
  * a non-breaking space so that the cell keeps its height.
  *
  * NOTE: The image sources are resolved only after sanitizing, since DOMPurify
- * removes `safe-file://` URLs. The sanitized HTML is parsed into an inert
+ * removes `safe-file://` URLs; Windows absolute paths (`E:/a.png`) are kept
+ * through the sanitizer explicitly. The sanitized HTML is parsed into an inert
  * template first, so that no image starts loading from an unresolved source.
  *
  * @param   {HTMLElement}  contentWrapper  The cell's content wrapper
@@ -67,7 +68,7 @@ export function renderCellContents (contentWrapper: HTMLElement, html: string, d
   }
 
   const template = document.createElement('template')
-  template.innerHTML = sanitizeHTML(html)
+  template.innerHTML = sanitizeHTML(html, { keepWindowsImagePaths: true })
 
   for (const image of Array.from(template.content.querySelectorAll('img'))) {
     const source = image.getAttribute('src')
