@@ -51,6 +51,10 @@ export default class FileDelete extends ZettlrCommand {
     // Ensure the file is closed before removing
     await this._app.documents.closeFileEverywhere(arg.path)
 
+    // Zettlr-LYH internal file operations (C16, R121): this deletion must not be
+    // taken for a removal by another program
+    this._app.documents.registerInternalFileOperation([arg.path])
+
     // Now, remove the file
     await this._app.fsal.removeFile(arg.path)
 

@@ -25,6 +25,9 @@ import attachLogger from './attach-logger'
 import type LogProvider from '@providers/log'
 import type ConfigProvider from '@providers/config'
 import type DocumentManager from '@providers/documents'
+import { MAIN_WINDOW_CLEARED_STORAGES } from './main-window-cleared-storages'
+
+export { MAIN_WINDOW_CLEARED_STORAGES }
 
 /**
  * Creates a BrowserWindow with main window configuration and loads the main
@@ -117,13 +120,10 @@ export default function createMainWindow (
   // Emitted when the user wants to close the window.
   window.on('close', (event) => {
     let ses = window.webContents.session
-    // Do not "clearCache" because that would only delete my own index files
+    // Do not "clearCache" because that would only delete my own index files.
+    // Zettlr-LYH (R94): local storage is kept; see MAIN_WINDOW_CLEARED_STORAGES.
     ses.clearStorageData({
-      storages: [
-        'cookies', // Nobody needs cookies except for downloading pandoc etc
-        'localstorage',
-        'shadercache' // Should never contain anything
-      ]
+      storages: [...MAIN_WINDOW_CLEARED_STORAGES]
     }).catch(e => {
       logger.error(`Could not clear session data: ${e.message as string}`, e)
     })

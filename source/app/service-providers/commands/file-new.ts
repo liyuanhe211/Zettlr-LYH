@@ -64,6 +64,23 @@ export default class FileNew extends ZettlrCommand {
       return
     }
 
+    // Zettlr-LYH scratch notes (R40): Ctrl+N and the toolbar button (no path,
+    // no name, Markdown) create a scratch note without asking for a location
+    if (arg.path === undefined && arg.name === undefined && (arg.type === undefined || arg.type === DocumentType.Markdown)) {
+      try {
+        await this._app.documents.newScratchNote(windowId, leafId)
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : trans('An unknown error occurred.')
+        this._app.log.error(`Could not create scratch note: ${message}`, err)
+        this._app.windows.prompt({
+          type: 'error',
+          title: trans('Could not create file'),
+          message
+        })
+      }
+      return
+    }
+
     // Assume there is no directory we could salvage, so choose the documents
     // directory, but (by setting isFallbackDir to true) allow the user to
     // change it.

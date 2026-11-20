@@ -54,7 +54,8 @@ export default class ForceOpen extends ZettlrCommand {
     // Now we have a file (if not, create a new one if the user wishes so)
     if (file !== undefined) {
       await this._app.documents.openFile(windowId, leafId, file.path, newTab)
-    } else if (await this._app.fsal.isDir(customDirectory)) {
+    } else if (!/\.pdf$/i.test(filename.trim()) && await this._app.fsal.isDir(customDirectory)) {
+      // Never create a note named after a PDF++ link into a PDF (R60)
       // Call the file-new command on the application, which'll do all
       // necessary steps for us.
       await this._app.commands.run('file-new', { windowId, leafId, name: linkContents, path: customDirectory })

@@ -101,6 +101,12 @@ export default class MenuProvider extends ProviderContract {
   _checkboxState: Map<string, boolean>
 
   /**
+   * Zettlr-LYH (R97): the recent file paths shown by the current application
+   * menu, used to rebuild the menu only when they change.
+   */
+  private _menuDocuments: string[] = []
+
+  /**
   * Creates the main application menu and sets it.
   */
   constructor (
@@ -117,8 +123,20 @@ export default class MenuProvider extends ProviderContract {
     // Begin listening to configuration update events that announce a change in
     // the recent docs list so that we can make sure the menu is always updated.
     this._config.on('update', () => { this.set() })
-    if (![ 'darwin', 'win32' ].includes(process.platform)) {
-      this._recentDocs.on('update', () => { this.set() })
+    // Zettlr-LYH (R97): Windows shows the application's own history, so it must
+    // be rebuilt as well (e.g. after Clear History… in the Recent Files window).
+    // The provider announces every tab activation, hence only rebuild when the
+    // (at most ten) paths shown in the menu actually change.
+    // _menuDocuments holds what the current menu actually shows; it is updated
+    // whenever the menu is built (the history may load after construction).
+    if (process.platform !== 'darwin') {
+      this._recentDocs.on('update', () => {
+        const current = this._recentDocs.get()
+        const shown = this._menuDocuments
+        if (current.length !== shown.length || current.some((documentPath, index) => documentPath !== shown[index])) {
+          this.set()
+        }
+      })
     }
 
     ipcMain.on('menu-provider', (event, message) => {
@@ -367,6 +385,7 @@ export default class MenuProvider extends ProviderContract {
       this._checkboxState.set(id, val)
     }
 
+    this._menuDocuments = this._recentDocs.get()
     const blueprint = BLUEPRINTS[process.platform](this._logger, this._config, this._recentDocs, this._commands, this._windows, this._documents, getState, setState)
     // Last but not least build the template
     return Menu.buildFromTemplate(blueprint)

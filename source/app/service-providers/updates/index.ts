@@ -36,6 +36,11 @@ import type ConfigProvider from '@providers/config'
 import { md2html } from '@common/modules/markdown-utils'
 import { showNativeNotification } from '@common/util/show-notification'
 import type WindowProvider from '../windows'
+import {
+  ZETTLR_LYH_UPDATE_SOURCE,
+  isUpdateSourceConfigured,
+  getReleasePage
+} from './update-source'
 
 /**
  * Struct which represents a single asset provided for by the updater
@@ -176,8 +181,8 @@ class UpdateError extends Error {
 }
 
 const CUR_VER = app.getVersion()
-const REPO_URL = 'https://zettlr.com/api/releases/latest'
-const RELEASE_PAGE = 'https://github.com/Zettlr/Zettlr/releases'
+// Zettlr-LYH (requirement R95): the upstream update URL and release page have
+// been removed; the update source is defined in ./update-source.ts only.
 const UPDATE_CHECK_INTERVAL = 1000 * 60 * 60 // 1 hour
 
 /**
@@ -192,7 +197,7 @@ function getUpdateState (): UpdateState {
     updateAvailable: false,
     prerelease: false,
     changelog: '',
-    releasePage: RELEASE_PAGE,
+    releasePage: getReleasePage(ZETTLR_LYH_UPDATE_SOURCE),
     tagName: '',
     compatibleAssets: [],
     name: '',
@@ -209,6 +214,7 @@ export default class UpdateProvider extends ProviderContract {
   private _updateState: UpdateState
   private _downloadReadStream: undefined|ReadStream
   private _downloadWriteStream: undefined|WriteStream
+  private _missingSourceLogged: boolean
 
   constructor (
     private readonly _logger: LogProvider,
@@ -227,6 +233,7 @@ export default class UpdateProvider extends ProviderContract {
     // Initialize the write/read streams used during downloads
     this._downloadReadStream = undefined
     this._downloadWriteStream = undefined
+    this._missingSourceLogged = false
 
     // Handle events
     ipcMain.handle('update-provider', async (event, data) => {
@@ -294,6 +301,18 @@ export default class UpdateProvider extends ProviderContract {
    * @return {Promise} Resolves only when there is an update available.
    */
   async check (): Promise<void> {
+    // Zettlr-LYH (requirement R95): never contact the upstream Zettlr update
+    // server. Until the user sets up an update source of their own in
+    // ./update-source.ts, no request is sent at all.
+    const updateSource = ZETTLR_LYH_UPDATE_SOURCE
+    if (!isUpdateSourceConfigured(updateSource)) {
+      if (!this._missingSourceLogged) {
+        this._missingSourceLogged = true
+        this._logger.verbose('[Update Provider] No update source configured for Zettlr-LYH; update checks are off.')
+      }
+      return
+    }
+
     if (!net.online || __UPDATES_DISABLED__ === '1') {
       // Don't check if we don't have an internet connection; preserve the last
       // state so that the user sees what the most recent result was. We also
@@ -305,7 +324,7 @@ export default class UpdateProvider extends ProviderContract {
     this._resetState()
 
     try {
-      this._logger.info(`[Update Provider] Checking ${REPO_URL} for application updates ...`)
+      this._logger.info(`[Update Provider] Checking ${updateSource.apiUrl} for application updates ...`)
       let platformString = ''
       if (process.platform === 'win32') {
         platformString = `Windows NT 10.0; ${process.arch}`
@@ -317,7 +336,7 @@ export default class UpdateProvider extends ProviderContract {
         platformString = `Linux ${process.arch === 'x64' ? 'x86_64' : process.arch}`
       }
 
-      const response: Response<string> = await got(REPO_URL, {
+      const response: Response<string> = await got(updateSource.apiUrl, {
         timeout: { request: 5000 },
         method: 'GET',
         headers: {

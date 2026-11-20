@@ -8,7 +8,7 @@
  * License:         GNU GPL v3
  *
  * Description:     This command saves an image from clipboard into the
- *                  "_Images" folder next to the document, without asking.
+ *                  "_Zettlr_Img" folder next to the document, without asking.
  *
  * END HEADER
  */
@@ -34,9 +34,9 @@ export interface SaveImageFromClipboardAPI {
 }
 
 /**
- * The payload the editor context menu's "Paste" action sends (see
- * copy-paste-cut.ts): it only names the document directory as `startPath` and
- * leaves reading the image to main.
+ * Legacy renderer payload: it only names the document directory as startPath
+ * and leaves reading the image to main. Current menu actions request a native
+ * paste event and send image bytes through the same route as keyboard paste.
  */
 interface ContextMenuPastePayload {
   startPath?: string
@@ -65,7 +65,7 @@ export default class SaveImage extends ZettlrCommand {
 
   /**
    * Takes an image provided for by the renderer (or, if none is provided, the
-   * image in the clipboard) and saves it into the "_Images" folder next to the
+   * image in the clipboard) and saves it into the "_Zettlr_Img" folder next to the
    * document, creating the folder if necessary. Returns the absolute path to
    * the saved image, or undefined if nothing was saved (the reason is then
    * shown to the user as a notification).

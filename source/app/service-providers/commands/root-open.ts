@@ -18,7 +18,7 @@ import { app } from 'electron'
 import path from 'path'
 import ZettlrCommand from './zettlr-command'
 import { type DirDescriptor } from '@dts/common/fsal'
-import { CODE_EXT, MD_EXT } from '@common/util/file-extention-checks'
+import { CODE_EXT, MD_EXT, hasMdOrCodeExt, hasPDFExt } from '@common/util/file-extention-checks'
 import type { AppServiceContainer } from 'source/app/app-service-container'
 import type { NodeError } from '../windows/map-fs-error'
 
@@ -127,7 +127,9 @@ export default class RootOpen extends ZettlrCommand {
       // opened accordingly.
       if (isFile && (newFile = await this._app.fsal.getDescriptorForAnySupportedFile(absPath)) !== undefined) {
         // Open the file immediately
-        await this._app.documents.openFile(winKey, leafId, newFile.path, true)
+        // Zettlr-LYH: a file opened again from Explorer moves to the last tab
+        await this._app.documents.openFile(winKey, leafId, newFile.path, true, true, hasPDFExt(newFile.path))
+        this.checkAgainstDisk(newFile.path)
         // Also set the newDir variable so that Zettlr will automatically
         // navigate to the directory. The directory of the latest file will
         // remain open afterwards.
@@ -150,8 +152,9 @@ export default class RootOpen extends ZettlrCommand {
         try {
           // If it was a file and not a directory, immediately open it.
           const file = await this._app.fsal.getDescriptorForAnySupportedFile(absPath)
-          if (file !== undefined && file.type !== 'other') {
-            await this._app.documents.openFile(winKey, leafId, file.path, true)
+          if (file !== undefined && (file.type !== 'other' || hasPDFExt(file.path))) {
+            await this._app.documents.openFile(winKey, leafId, file.path, true, false, hasPDFExt(file.path))
+            this.checkAgainstDisk(file.path)
           }
         } catch (err: any) {
           // Something went wrong, so remove the path again.
@@ -166,5 +169,23 @@ export default class RootOpen extends ZettlrCommand {
     if (newDir !== undefined) {
       this._app.config.set('openDirectory', newDir.path)
     }
+  }
+
+  /**
+   * Zettlr-LYH open-with disk check (R51): a file opened from outside the app
+   * may have been changed by another program in the meantime, so compare an
+   * already loaded file with the disk. Not awaited, so that a dialog shown for
+   * one file does not hold up opening the remaining files.
+   *
+   * @param  {string}  filePath  The file that has been opened
+   */
+  private checkAgainstDisk (filePath: string): void {
+    if (!hasMdOrCodeExt(filePath)) {
+      return // Attachments must never enter the text conflict flow.
+    }
+    this._app.documents.checkLoadedFileAgainstDisk(filePath).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err)
+      this._app.log.error(`Could not check ${filePath} against the disk: ${message}`, err)
+    })
   }
 }

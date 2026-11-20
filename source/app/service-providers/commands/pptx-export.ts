@@ -15,6 +15,11 @@
  *                  its <name>.pptx.style_manifest.json and
  *                  <name>.pptx.slide_ids.json companions; the command reports
  *                  the script's overflow and undersized-text findings back.
+ *                  Tracked changes (spec C10) are accepted first: a document
+ *                  that contains them is converted from a hidden temporary
+ *                  copy next to it (so that relative image paths still
+ *                  resolve), with the output path given explicitly, and the
+ *                  copy is deleted afterwards.
  *
  *                  Design note: the export deliberately does NOT assemble the
  *                  deck from the preview worker's per-page chunks. Running the
@@ -31,6 +36,7 @@ import ZettlrCommand from './zettlr-command'
 import { spawn } from 'child_process'
 import os from 'os'
 import path from 'path'
+import { promises as fs } from 'fs'
 import isFile from '@common/util/is-file'
 import { parsePptxPreviewConfiguration } from '@common/pandoc-util/pptx-preview-configuration'
 import { buildPptxExportInvocation, resolveConversionScriptPath } from '@common/util/pptx-export-invocation'
@@ -39,6 +45,7 @@ import type { PptxExportCommandArg, PptxExportResult } from '@dts/common/pptx-ex
 import type { AppServiceContainer } from 'source/app/app-service-container'
 // The same interpreter the pptx-preview command runs its worker with
 import { PYTHON_PATH } from './pptx-preview'
+import { prepareMarkdownForPptx } from './pptx-preview/preview-orchestrator'
 
 /**
  * A full conversion drives PowerPoint through COM for its checks, which can
@@ -48,6 +55,41 @@ const EXPORT_TIMEOUT_MILLISECONDS = 10 * 60 * 1000
 
 function failure (error: string): PptxExportResult {
   return { ok: false, overflowCount: 0, authorizedOverflowCount: 0, undersizedCount: 0, error }
+}
+
+/**
+ * The hidden temporary copy, next to the document, from which a document with
+ * tracked changes is exported, e.g. ".Talk.accepted-revisions.md" for
+ * "Talk.md" in the same folder.
+ *
+ * @param   {string}  markdownPath  Absolute path of the document
+ *
+ * @return  {string}                Absolute path of the temporary copy
+ */
+export function acceptedRevisionsSourcePath (markdownPath: string): string {
+  const parsed = path.parse(markdownPath)
+  return path.join(parsed.dir, `.${parsed.name}.accepted-revisions${parsed.ext}`)
+}
+
+/**
+ * Rewrites the script arguments of an export so that the script reads the
+ * temporary copy and still writes the .pptx of the document itself: the
+ * document path is replaced by the copy followed by the explicit output path.
+ *
+ * @param   {string[]}  args          The arguments for the document itself
+ * @param   {string}    markdownPath  The document path among them
+ * @param   {string}    sourcePath    The temporary copy to convert instead
+ * @param   {string}    outputPath    The .pptx the document's export writes
+ *
+ * @return  {string[]}                The rewritten arguments
+ */
+export function argumentsForAcceptedSource (args: string[], markdownPath: string, sourcePath: string, outputPath: string): string[] {
+  const index = args.indexOf(markdownPath)
+  if (index < 0) {
+    return args
+  }
+
+  return [ ...args.slice(0, index), sourcePath, outputPath, ...args.slice(index + 1) ]
 }
 
 export default class PptxExport extends ZettlrCommand {
@@ -92,6 +134,7 @@ export default class PptxExport extends ZettlrCommand {
     }
 
     this.runningExports.add(filePath)
+    let temporarySourcePath: string|undefined
     try {
       // The same per-document template the preview renders against: the one
       // named in the document's configuration comment (relative paths resolve
@@ -115,8 +158,18 @@ export default class PptxExport extends ZettlrCommand {
         templatePath
       })
 
+      // Deleted text must not reach the slides (spec C10, export item 3)
+      let args = invocation.args
+      const exportedContent = prepareMarkdownForPptx(content)
+      if (exportedContent !== content) {
+        temporarySourcePath = acceptedRevisionsSourcePath(filePath)
+        await fs.writeFile(temporarySourcePath, exportedContent, 'utf-8')
+        args = argumentsForAcceptedSource(invocation.args, filePath, temporarySourcePath, invocation.outputPath)
+        this._app.log.info(`[PptxExport] ${filePath} contains tracked changes; exporting it with all of them accepted`)
+      }
+
       this._app.log.info(`[PptxExport] Exporting ${filePath} to ${invocation.outputPath}`)
-      const run = await this.runProcess(invocation.command, invocation.args, path.dirname(filePath))
+      const run = await this.runProcess(invocation.command, args, path.dirname(filePath))
 
       if (run.spawnError !== undefined) {
         return failure(`Could not start Python: ${run.spawnError}`)
@@ -146,6 +199,13 @@ export default class PptxExport extends ZettlrCommand {
       this._app.log.error(`[PptxExport] Export of ${filePath} failed: ${message}`)
       return failure(message)
     } finally {
+      if (temporarySourcePath !== undefined) {
+        const copyPath = temporarySourcePath
+        await fs.rm(copyPath, { force: true }).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error)
+          this._app.log.warning(`[PptxExport] Could not delete the temporary copy ${copyPath}: ${message}`)
+        })
+      }
       this.runningExports.delete(filePath)
     }
   }

@@ -67,15 +67,9 @@ export default function getMenu (
   recentDocsItem = {
     id: 'menu.recent_docs',
     label: trans('Recent files'),
+    // Zettlr-LYH (R97): the history is cleared only from the Recent Files
+    // window, so this submenu has no Clear item.
     submenu: [
-      {
-        id: 'menu.clear_recent_docs',
-        label: trans('Clear'),
-        click: function (_menuitem, _focusedWindow) {
-          recentDocs.clear()
-        },
-        enabled: docs.length > 0
-      },
       ...docs.map(item => {
         const ret: MenuItemConstructorOptions = {
           id: 'menu.recent_docs.' + item,
@@ -91,7 +85,15 @@ export default function getMenu (
         }
 
         return ret
-      })
+      }),
+      ...(docs.length > 0 ? [{ type: 'separator' as const }] : []),
+      {
+        id: 'menu.show_all_recent_files',
+        label: 'Show All Recent Files…',
+        click: function (_menuitem, focusedWindow) {
+          windows.showRecentFilesWindow(focusedWindow as BrowserWindow|undefined)
+        }
+      }
     ]
   }
 
@@ -183,6 +185,15 @@ export default function getMenu (
           accelerator: 'Ctrl+S',
           click: function (_menuItem, focusedWindow) {
             (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'save-file')
+          }
+        },
+        // Zettlr-LYH save as (R48): save the current file under a new name
+        {
+          id: 'menu.save_as',
+          label: trans('Save As…'),
+          accelerator: 'Ctrl+Shift+S',
+          click: function (_menuItem, focusedWindow) {
+            (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'save-file-as')
           }
         },
         {
@@ -306,7 +317,8 @@ export default function getMenu (
         {
           id: 'menu.rename_file',
           label: trans('Rename file'),
-          accelerator: 'Ctrl+R',
+          // Zettlr-LYH (R108): Ctrl+R is reserved for Revise Comments
+          accelerator: 'F2',
           click: function (_menuitem, focusedWindow) {
             (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'rename-file')
           }
@@ -503,6 +515,25 @@ export default function getMenu (
         {
           type: 'separator'
         },
+        // Zettlr-LYH split view (R44): a second view of the active file in a
+        // new pane next to the focused one
+        {
+          id: 'menu.split_editor_right',
+          label: 'Split Editor Right',
+          click: function (_menuitem, focusedWindow) {
+            (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'split-editor-right')
+          }
+        },
+        {
+          id: 'menu.split_editor_down',
+          label: 'Split Editor Down',
+          click: function (_menuitem, focusedWindow) {
+            (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'split-editor-down')
+          }
+        },
+        {
+          type: 'separator'
+        },
         {
           id: 'menu.reset_zoom',
           label: trans('Reset zoom'),
@@ -597,6 +628,19 @@ export default function getMenu (
             (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'close-window')
           }
         },
+        // Zettlr-LYH reopen closed tab (R43): handled directly by the
+        // document manager in the main process
+        {
+          id: 'menu.tab_reopen_closed',
+          label: trans('Reopen Closed Tab'),
+          accelerator: sc('reopen-closed-tab'),
+          click: function (_menuitem, focusedWindow) {
+            const window = focusedWindow as BrowserWindow|undefined
+            const windowId = window !== undefined ? windows.getMainWindowKey(window) : undefined
+            documents.reopenClosedTab(windowId)
+              .catch(e => logger.error(`[Menu] Could not reopen the closed tab: ${String(e.message)}`, e))
+          }
+        },
         {
           id: 'menu.tab_previous',
           label: trans('Previous Tab'),
@@ -611,6 +655,18 @@ export default function getMenu (
           accelerator: sc('next-tab'),
           click: function (_menuitem, focusedWindow) {
             (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'next-tab')
+          }
+        },
+        {
+          type: 'separator'
+        },
+        // Zettlr-LYH Windows dialog (R72): the window manager lists, sorts,
+        // saves and closes the open documents of the main window
+        {
+          id: 'menu.windows_manager',
+          label: trans('Windows…'),
+          click: function (_menuitem, focusedWindow) {
+            (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'windows-manager')
           }
         },
         {

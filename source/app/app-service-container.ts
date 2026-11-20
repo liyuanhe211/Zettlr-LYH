@@ -26,15 +26,18 @@ import FSAL from '@providers/fsal'
 import LinkProvider from '@providers/links'
 import LogProvider from '@providers/log'
 import MenuProvider from '@providers/menu'
+import PdfBacklinkProvider from '@providers/pdf-backlinks'
 import type ProviderContract from '@providers/provider-contract'
 import RecentDocumentsProvider from '@providers/recent-docs'
+import RecoveryJournalProvider from '@providers/recovery-journal'
 import StatsProvider from '@providers/stats'
 import TagProvider from '@providers/tags'
 import TargetProvider from '@providers/targets'
 import TrayProvider from '@providers/tray'
 import UpdateProvider from '@providers/updates'
 import WindowProvider from '@providers/windows'
-import { dialog } from 'electron'
+import { app, dialog } from 'electron'
+import { createNodeFontInstallDependencies, ensureBundledFontInstalled } from './util/bundled-font-install'
 import { closeSplashScreen, showSplashScreen, updateSplashScreen } from './util/splash-screen'
 import path from 'path'
 import { trans } from 'source/common/i18n-main'
@@ -84,6 +87,7 @@ export class AppServiceContainer {
   private readonly _logProvider: LogProvider
   private readonly _menuProvider: MenuProvider
   private readonly _recentDocsProvider: RecentDocumentsProvider
+  private readonly _recoveryJournalProvider: RecoveryJournalProvider
   private readonly _statsProvider: StatsProvider
   private readonly _tagProvider: TagProvider
   private readonly _targetProvider: TargetProvider
@@ -94,6 +98,7 @@ export class AppServiceContainer {
   private readonly _documentManager: DocumentManager
   private readonly _lrtProvider: LongRunningTaskProvider
   private readonly _searchProvider: SearchProvider
+  private readonly _pdfBacklinkProvider: PdfBacklinkProvider
   private _isBooted: boolean
 
   constructor () {
@@ -109,6 +114,9 @@ export class AppServiceContainer {
 
     // Now according to their dependencies
     this._recentDocsProvider = new RecentDocumentsProvider(this._logProvider)
+    // Zettlr-LYH data loss prevention (R173): the recovery journal depends on
+    // nothing but the log, least of all on the document provider
+    this._recoveryJournalProvider = new RecoveryJournalProvider(this._logProvider)
     this._assetsProvider = new AssetsProvider(this._logProvider)
     this._cssProvider = new CssProvider(this._logProvider)
     this._statsProvider = new StatsProvider(this._logProvider)
@@ -119,11 +127,12 @@ export class AppServiceContainer {
     this._targetProvider = new TargetProvider(this._logProvider, this._fsal)
     this._linkProvider = new LinkProvider(this._logProvider, this._configProvider, this._fsal)
     this._searchProvider = new SearchProvider(this._logProvider, this._fsal, this._configProvider)
-    
+    this._pdfBacklinkProvider = new PdfBacklinkProvider(this._logProvider, this._configProvider, this._fsal)
+
     // The document provider accesses only the FSAL in its constructor
     this._documentManager = new DocumentManager(this)
     this._tagProvider = new TagProvider(this._logProvider, this._documentManager, this._configProvider, this._fsal)
-    this._windowProvider = new WindowProvider(this._logProvider, this._configProvider, this._documentManager)
+    this._windowProvider = new WindowProvider(this._logProvider, this._configProvider, this._documentManager, this._recentDocsProvider)
 
     this._citeprocProvider = new CiteprocProvider(this._logProvider, this._configProvider, this._windowProvider)
     this._trayProvider = new TrayProvider(this._logProvider, this._configProvider, this._windowProvider)
@@ -166,6 +175,9 @@ export class AppServiceContainer {
     await this._informativeBoot(this._fsal, 'FSAL')
 
     await this._informativeBoot(this._recentDocsProvider, 'RecentDocsProvider')
+    // Zettlr-LYH data loss prevention (R173): must answer before any window
+    // (and thereby any editor) exists
+    await this._informativeBoot(this._recoveryJournalProvider, 'RecoveryJournalProvider')
     await this._informativeBoot(this._assetsProvider, 'AssetsProvider')
     await this._informativeBoot(this._statsProvider, 'StatsProvider')
 
@@ -183,6 +195,7 @@ export class AppServiceContainer {
     await this._informativeBoot(this._targetProvider, 'TargetProvider')
     await this._informativeBoot(this._linkProvider, 'LinkProvider')
     await this._informativeBoot(this._searchProvider, 'SearchProvider')
+    await this._informativeBoot(this._pdfBacklinkProvider, 'PdfBacklinkProvider')
 
     // Boot the commands before the window provider to ensure the handler for
     // application requests from windows is registered before any window opens
@@ -217,6 +230,19 @@ export class AppServiceContainer {
 
     // After everything has been booted up, show the windows
     this.windows.maybeShowWindows()
+
+    // Only now, with the windows on their way, make sure that the font for the
+    // document tabs, which ships with the app, is installed for the current
+    // user (Windows only). This is deliberately not awaited, so it cannot delay
+    // anything; whatever fails is only written to the log.
+    if (process.platform === 'win32') {
+      ensureBundledFontInstalled(createNodeFontInstallDependencies({
+        isPackaged: app.isPackaged,
+        appPath: app.getAppPath(),
+        resourcesPath: process.resourcesPath,
+        logger: this.log
+      })).catch(err => this.log.error('[AppServiceContainer] Could not check whether the bundled font is installed', err))
+    }
   }
 
   public get isBooted () { return this._isBooted }
@@ -261,12 +287,17 @@ export class AppServiceContainer {
     await this._safeShutdown(this._linkProvider, 'LinkProvider')
     await this._safeShutdown(this._tagProvider, 'TagProvider')
     await this._safeShutdown(this._searchProvider, 'SearchProvider')
+    await this._safeShutdown(this._pdfBacklinkProvider, 'PdfBacklinkProvider')
     await this._safeShutdown(this._menuProvider, 'MenuProvider')
     await this._safeShutdown(this._recentDocsProvider, 'RecentDocsProvider')
     await this._safeShutdown(this._dictionaryProvider, 'DictionaryProvider')
     await this._safeShutdown(this._citeprocProvider, 'CiteprocProvider')
     await this._safeShutdown(this._assetsProvider, 'AssetsProvider')
     await this._safeShutdown(this._appearanceProvider, 'AppearanceProvider')
+    // Zettlr-LYH data loss prevention (R173): shut down late, so that the
+    // records which the windows sent while closing are on disk before the app
+    // quits
+    await this._safeShutdown(this._recoveryJournalProvider, 'RecoveryJournalProvider')
     await this._safeShutdown(this._configProvider, 'ConfigProvider')
     await this._safeShutdown(this._logProvider, 'LogProvider')
   }

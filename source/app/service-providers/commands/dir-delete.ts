@@ -47,11 +47,22 @@ export default class DirDelete extends ZettlrCommand {
       return false
     }
 
+    // Zettlr-LYH internal file operations (C16, R121): deleting the folder must
+    // not be taken for a removal of its open files by another program
+    const openFiles = this._app.documents.getOpenFilesInDirectory(arg.path)
+    this._app.documents.registerInternalFileOperation(openFiles)
+
     try {
       await this._app.fsal.removeDir(arg.path)
     } catch (err: unknown) {
       this._app.log.error(err instanceof Error ? err.message : 'unknown error', err)
       return false
+    }
+
+    // Since their removal is ignored now, close the open files of the folder
+    // here, as the watcher of the open files did before
+    for (const filePath of openFiles) {
+      await this._app.documents.closeFileEverywhere(filePath)
     }
 
     return true

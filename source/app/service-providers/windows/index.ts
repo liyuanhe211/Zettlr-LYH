@@ -20,6 +20,7 @@ import {
   screen,
   BrowserWindow,
   ipcMain,
+  dialog,
   shell,
   type FileFilter,
   type MessageBoxOptions
@@ -31,6 +32,11 @@ import createPrintWindow from './create-print-window'
 import createUpdateWindow from './create-update-window'
 import createLogWindow from './create-log-window'
 import createStatsWindow from './create-stats-window'
+import createRecentFilesWindow from './create-recent-files-window'
+import { clearRecentFilesHistory } from './recent-files-clear'
+import type RecentDocumentsProvider from '@providers/recent-docs'
+import isFile from '@common/util/is-file'
+import { RECENT_FILES_CHANNEL, RECENT_FILES_UPDATED_CHANNEL, type RecentFilesRequest, type RecentFilesSnapshot, type RecentFilesOpenResult, type RecentFilesClearResult } from '@dts/common/recent-files'
 import createPreferencesWindow from './create-preferences-window'
 import createAboutWindow from './create-about-window'
 import createTagManagerWindow from './create-tag-manager-window'
@@ -40,9 +46,8 @@ import createPasteImageModal from './create-paste-image-modal'
 import createErrorModal from './create-error-modal'
 import shouldOverwriteFileDialog from './dialog/should-overwrite-file'
 import shouldCloseAllDialog from './dialog/should-close-all'
-import shouldReplaceFileDialog from './dialog/should-replace-file'
 import askDirectoryDialog from './dialog/ask-directory'
-import askSaveChanges from './dialog/ask-save-changes'
+import askSaveChanges, { askSaveChangesInBatch } from './dialog/ask-save-changes'
 import promptDialog from './dialog/prompt'
 import type { WindowPosition } from './types'
 import askFileDialog from './dialog/ask-file'
@@ -58,6 +63,14 @@ import type ConfigProvider from '@providers/config'
 import PersistentDataContainer from '@common/modules/persistent-data-container'
 import { getCLIArgument, LAUNCH_MINIMIZED } from '@providers/cli-provider'
 import type { PasteModalResult } from '../commands/save-image-from-clipboard'
+import {
+  formatRuntimeErrorLogEntry,
+  formatUserNotice,
+  isRuntimeErrorReport,
+  RuntimeErrorNoticeGate,
+  toRuntimeErrorLogEntry,
+  type RuntimeErrorReport
+} from './runtime-error-notice'
 
 export interface RequestFilesIPCAPI {
   filters: FileFilter[],
@@ -66,6 +79,98 @@ export interface RequestFilesIPCAPI {
 
 export interface CloseAllIPCAPI {
   rootType: 'workspace'|'file'
+}
+
+// Zettlr-LYH tab drag-out (R115): a point and a rectangle in screen
+// coordinates (device independent pixels, like Electron's window bounds)
+export interface ScreenPoint {
+  x: number
+  y: number
+}
+
+export interface ScreenRectangle {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * Whether the screen point lies inside at least one of the rectangles. A
+ * point exactly on a rectangle's edge counts as inside (R115).
+ *
+ * @param   {ScreenPoint}        point       The point
+ * @param   {ScreenRectangle[]}  rectangles  The rectangles, e.g. window bounds
+ *
+ * @return  {boolean}                        True if any rectangle contains it
+ */
+export function isPointInsideAnyRectangle (point: ScreenPoint, rectangles: ScreenRectangle[]): boolean {
+  return rectangles.some(rectangle => {
+    return point.x >= rectangle.x && point.x <= rectangle.x + rectangle.width &&
+      point.y >= rectangle.y && point.y <= rectangle.y + rectangle.height
+  })
+}
+
+/**
+ * Computes the bounds of the window that a tab dragged out of a window opens
+ * (R115): its top left corner sits at the release point minus the point where
+ * the tab was grabbed inside the window, so that the tab lands under the
+ * pointer, and its size is the given one. Both are then fitted into the work
+ * area of the display the tab was released on.
+ *
+ * @param   {ScreenPoint}      releasePoint  Where the tab was released
+ * @param   {ScreenPoint}      grabOffset    Where it was grabbed, relative to the window
+ * @param   {{ width: number, height: number }}  size  The size of the window
+ * @param   {ScreenRectangle}  workArea      The work area of the display
+ *
+ * @return  {ScreenRectangle}                The bounds of the new window
+ */
+export function computeTornOffWindowBounds (
+  releasePoint: ScreenPoint,
+  grabOffset: ScreenPoint,
+  size: { width: number, height: number },
+  workArea: ScreenRectangle
+): ScreenRectangle {
+  const width = Math.min(size.width, workArea.width)
+  const height = Math.min(size.height, workArea.height)
+  const clamp = (value: number, minimum: number, maximum: number): number => Math.min(Math.max(value, minimum), maximum)
+  const x = clamp(releasePoint.x - grabOffset.x, workArea.x, workArea.x + workArea.width - width)
+  const y = clamp(releasePoint.y - grabOffset.y, workArea.y, workArea.y + workArea.height - height)
+  return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) }
+}
+
+/**
+ * Builds the script that a new main window runs to scroll its editor to the
+ * reading position of a tab dragged out of another window (R115). The editor
+ * only reaches its full height once the document has loaded, so the script
+ * waits up to ten seconds for a scroller that is tall enough.
+ *
+ * @param   {number}  scrollTop  The scroll position to restore, in pixels
+ *
+ * @return  {string}             The script for executeJavaScript
+ */
+export function buildEditorScrollRestoreScript (scrollTop: number): string {
+  const target = Math.max(0, Math.round(scrollTop))
+  return `(() => {
+  const target = ${target}
+  let attempts = 0
+  const apply = () => {
+    attempts++
+    const scroller = document.querySelector('.editor-pane .cm-scroller')
+    if (scroller === null || scroller.scrollHeight - scroller.clientHeight < target) {
+      if (attempts < 100) {
+        setTimeout(apply, 100)
+        return
+      }
+      if (scroller === null) {
+        return
+      }
+    }
+    scroller.scrollTop = target
+    requestAnimationFrame(() => { scroller.scrollTop = target })
+  }
+  apply()
+})()`
 }
 
 export type WindowControlsIPCAPI = IPCAPI<{
@@ -89,6 +194,9 @@ export default class WindowProvider extends ProviderContract {
   private _updateWindow: BrowserWindow|null
   private _logWindow: BrowserWindow|null
   private _statsWindow: BrowserWindow|null
+  private _recentFilesWindow: BrowserWindow|null = null
+  private _recentFilesSourceKey: string|undefined
+  private _recentFilesUpdateListener: (() => void)|undefined
   private _assetsWindow: BrowserWindow|null
   private readonly _projectProperties: Map<string, BrowserWindow>
   private _preferences: BrowserWindow|null
@@ -104,11 +212,13 @@ export default class WindowProvider extends ProviderContract {
   private suppressWindowOpening: boolean
   private readonly _emitter: EventEmitter
   private readonly _lastMainWindow: { windowId: string|undefined }
+  private readonly _runtimeErrorNoticeGate: RuntimeErrorNoticeGate
 
   constructor (
     private readonly _logger: LogProvider,
     private readonly _config: ConfigProvider,
-    private readonly _documents: DocumentManager
+    private readonly _documents: DocumentManager,
+    private readonly _recentDocs: RecentDocumentsProvider
   ) {
     super()
     this._emitter = new EventEmitter()
@@ -129,6 +239,50 @@ export default class WindowProvider extends ProviderContract {
     this._configFile = path.join(app.getPath('userData'), 'window_state.yml')
     this._stateContainer = new PersistentDataContainer(this._configFile, 'yaml', 1000)
     this._lastMainWindow = { windowId: undefined }
+    this._runtimeErrorNoticeGate = new RuntimeErrorNoticeGate()
+    ipcMain.handle(RECENT_FILES_CHANNEL, async (event, request: RecentFilesRequest): Promise<RecentFilesSnapshot|RecentFilesOpenResult|RecentFilesClearResult> => {
+      const historyWindow = this._recentFilesWindow
+      if (historyWindow === null || historyWindow.isDestroyed() || historyWindow.webContents.isDestroyed() ||
+        event.sender !== historyWindow.webContents || event.sender.isDestroyed()) {
+        return { success: false, error: 'This request must come from the Recent Files window.' }
+      }
+      if (request?.command === 'get-history') {
+        return { paths: this._recentDocs.getAll() }
+      }
+      // Zettlr-LYH (R97): confirm in a dialog parented to the history window,
+      // then clear the complete history
+      if (request?.command === 'clear-history') {
+        return await clearRecentFilesHistory(historyWindow, this._recentDocs)
+      }
+      if (request?.command !== 'open-file' || typeof request.payload?.path !== 'string' ||
+        !this._recentDocs.getAll().includes(request.payload.path)) {
+        return { success: false, error: 'This file is not in the current recent history.' }
+      }
+      const filePath = request.payload.path
+      const entries = Object.entries(this._mainWindows).filter(([ , window ]) => !window.isDestroyed())
+      const target = entries.find(([key]) => key === this._recentFilesSourceKey) ??
+        entries.find(([key]) => key === this._lastMainWindow.windowId) ?? entries[0]
+      if (target === undefined) {
+        return { success: false, error: 'No main window is available to open this file.' }
+      }
+      try {
+        if (!isFile(filePath)) {
+          return { success: false, error: 'The file no longer exists or cannot be accessed.' }
+        }
+        const opened = await this._documents.openFile(target[0], undefined, filePath, true)
+        if (!opened) {
+          return { success: false, error: 'The file could not be opened in Zettlr.' }
+        }
+        if (target[1].isDestroyed()) {
+          return { success: false, error: 'The target main window was closed while opening the file.' }
+        }
+        this._makeVisible(target[1])
+        return { success: true }
+      } catch (error) {
+        this._logger.error(`Could not open recent file: ${String(error)}`)
+        return { success: false, error: 'The file could not be opened. Check that it still exists and is accessible.' }
+      }
+    })
 
     // If the corresponding CLI flag is passed, we should suppress opening of
     // any windows until the user has manually activated the app by utilizing
@@ -248,6 +402,14 @@ export default class WindowProvider extends ProviderContract {
       return await this.shouldCloseAll(rootType)
     })
 
+    // Renderers report errors that nothing handled (logged silently) and
+    // operations that did not complete (shown to the user)
+    ipcMain.on('renderer-runtime-error', (event, payload: unknown) => {
+      if (isRuntimeErrorReport(payload)) {
+        this.reportRuntimeError(BrowserWindow.fromWebContents(event.sender), payload)
+      }
+    })
+
     this._documents.on(DP_EVENTS.CHANGE_FILE_STATUS, (_ctx: any) => {
       // Always update the main window's flag depending on whether the document
       // manager is clean or not
@@ -339,6 +501,13 @@ export default class WindowProvider extends ProviderContract {
    * Shuts down the window manager and performs final operations
    */
   async shutdown (): Promise<void> {
+    ipcMain.removeHandler(RECENT_FILES_CHANNEL)
+    this._detachRecentFilesListener()
+    if (this._recentFilesWindow !== null && !this._recentFilesWindow.isDestroyed()) {
+      this._recentFilesWindow.close()
+    }
+    this._recentFilesWindow = null
+    this._recentFilesSourceKey = undefined
     this._stateContainer.shutdown()
   }
 
@@ -679,8 +848,119 @@ export default class WindowProvider extends ProviderContract {
   }
 
   /**
-   * Displays the log window
+   * Zettlr-LYH tab drag-out (R115): whether the screen point lies inside one
+   * of the visible, not minimized main windows.
+   *
+   * @param   {ScreenPoint}  point  The point in screen coordinates
+   *
+   * @return  {boolean}             True if a main window covers the point
    */
+  public isScreenPointInsideMainWindow (point: ScreenPoint): boolean {
+    const rectangles = Object.values(this._mainWindows)
+      .filter(mainWindow => !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized())
+      .map(mainWindow => mainWindow.getBounds())
+    return isPointInsideAnyRectangle(point, rectangles)
+  }
+
+  /**
+   * Zettlr-LYH tab drag-out (R115): stores the position of the main window
+   * that is about to open for the given key, so that it opens where the tab
+   * was released, with the size of the window the tab came from. Call this
+   * before the document manager announces the new window.
+   *
+   * @param  {string}       key           The key of the new window
+   * @param  {string}       originKey     The key of the window the tab came from
+   * @param  {ScreenPoint}  releasePoint  Where the tab was released
+   * @param  {ScreenPoint}  grabOffset    Where the tab was grabbed, in CSS
+   *                                      pixels relative to the origin window
+   */
+  public placeNextMainWindow (key: string, originKey: string, releasePoint: ScreenPoint, grabOffset: ScreenPoint): void {
+    const display = screen.getDisplayNearestPoint({ x: Math.round(releasePoint.x), y: Math.round(releasePoint.y) })
+    let size = { width: display.workArea.width / 2, height: display.workArea.height / 2 }
+    let zoomFactor = 1
+    const origin = this._mainWindows[originKey]
+    if (origin !== undefined && !origin.isDestroyed()) {
+      // A maximized window opens the new one at its restored size
+      const { width, height } = origin.isMaximized() ? origin.getNormalBounds() : origin.getBounds()
+      size = { width, height }
+      // The grab point comes in CSS pixels, which the page zoom scales
+      zoomFactor = origin.webContents.getZoomFactor()
+    }
+
+    const bounds = computeTornOffWindowBounds(
+      releasePoint,
+      { x: grabOffset.x * zoomFactor, y: grabOffset.y * zoomFactor },
+      size,
+      display.workArea
+    )
+    this._windowState.set(`main-${key}`, { ...bounds, lastDisplayId: display.id, isMaximised: false })
+    this._persistWindowPositions()
+  }
+
+  /**
+   * Zettlr-LYH tab drag-out (R115): once the main window with the given key
+   * has loaded, scrolls its editor to the given position, so that a tab
+   * dragged out of another window keeps its reading position.
+   *
+   * @param  {string}  key        The key of the main window
+   * @param  {number}  scrollTop  The scroll position of the editor, in pixels
+   */
+  public restoreEditorScrollTop (key: string, scrollTop: number): void {
+    const mainWindow = this._mainWindows[key]
+    if (mainWindow === undefined || mainWindow.isDestroyed() || !Number.isFinite(scrollTop) || scrollTop <= 0) {
+      return
+    }
+
+    const script = buildEditorScrollRestoreScript(scrollTop)
+    mainWindow.webContents.once('did-finish-load', () => {
+      if (mainWindow.isDestroyed()) {
+        return
+      }
+      mainWindow.webContents.executeJavaScript(script).catch(error => {
+        this._logger.error(`[Window Manager] Could not restore the editor scroll position: ${String(error)}`)
+      })
+    })
+  }
+
+  /**
+   * Displays the independent recent history window and remembers its source.
+   */
+  showRecentFilesWindow (sourceWindow?: BrowserWindow): void {
+    const source = sourceWindow ?? this.getFirstMainWindow()
+    this._recentFilesSourceKey = source === undefined ? undefined : this.getMainWindowKey(source)
+    if (this._recentFilesWindow !== null && !this._recentFilesWindow.isDestroyed()) {
+      this._makeVisible(this._recentFilesWindow)
+      return
+    }
+    this._detachRecentFilesListener()
+    const position = this._retrieveWindowPosition('recent-files', null)
+    const window = createRecentFilesWindow(this._logger, this._config, position)
+    this._recentFilesWindow = window
+    this._hookWindowResize(window, 'recent-files')
+    const listener = (): void => {
+      if (this._recentFilesWindow === window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(RECENT_FILES_UPDATED_CHANNEL, { paths: this._recentDocs.getAll() })
+      }
+    }
+    this._recentFilesUpdateListener = listener
+    this._recentDocs.on('update', listener)
+    window.once('closed', () => {
+      if (this._recentFilesWindow === window) {
+        this._detachRecentFilesListener()
+        this._recentFilesWindow = null
+        this._recentFilesSourceKey = undefined
+      }
+    })
+  }
+
+  private _detachRecentFilesListener (): void {
+    if (this._recentFilesUpdateListener !== undefined) {
+      this._recentDocs.off('update', this._recentFilesUpdateListener)
+      this._recentFilesUpdateListener = undefined
+    }
+  }
+
+  /** Displays the log window. */
   showLogWindow (): void {
     if (this._logWindow === null) {
       const conf = this._retrieveWindowPosition('log', null)
@@ -954,28 +1234,6 @@ export default class WindowProvider extends ProviderContract {
   // ######################### DIALOG BOXES ####################################
 
   /**
-   * Asks the user for confirmation whether to replace an opened file with a
-   * newer version.
-   *
-   * @param {string}   filename The filename to be displayed.
-   * @return {boolean} True if the file should be replaced
-   */
-  async shouldReplaceFile (filePath: string): Promise<boolean> {
-    const firstMainWin = this.getFirstMainWindow()
-    if (firstMainWin === undefined) {
-      // If the main window is not open, there is no sense in showing this
-      // box, as the file is not really "open". It will be shown once a new
-      // main window is opened, but then the file contents will be loaded from
-      // disk either way.
-      return true
-    }
-
-    const filename = path.basename(filePath)
-
-    return await shouldReplaceFileDialog(this._config, firstMainWin, filename)
-  }
-
-  /**
     * Ask whether or not the user wants to replace a certain file.
     * @param   {string} filename The filename that should be contained in the message
     * @return  {boolean}         Resolves with true if the file should be overwritten
@@ -1022,6 +1280,24 @@ export default class WindowProvider extends ProviderContract {
       throw new Error('Could not ask to save changes: No main window was open!')
     }
     return await askSaveChanges(firstMainWin, detail)
+  }
+
+  /**
+   * Zettlr-LYH Windows dialog (R72): asks about one file with unsaved changes
+   * while several files are closed at once. The response is 0 = Save,
+   * 1 = Don't Save, 2 = Cancel, 3 = Keep All, 4 = Discard All Changes.
+   *
+   * @param   {string}  [detail]  An optional string to display in the
+   *                              `detail` section of the dialogue.
+   *
+   * @return  {Promise<Electron.MessageBoxReturnValue>}  The message box results
+   */
+  async askSaveChangesInBatch (detail?: string): Promise<Electron.MessageBoxReturnValue> {
+    const firstMainWin = this.getFirstMainWindow()
+    if (firstMainWin === undefined) {
+      throw new Error('Could not ask to save changes: No main window was open!')
+    }
+    return await askSaveChangesInBatch(firstMainWin, detail)
   }
 
   /**
@@ -1098,5 +1374,53 @@ export default class WindowProvider extends ProviderContract {
       return
     }
     promptDialog(this._logger, firstMainWin, options)
+  }
+
+  /**
+   * Handles a report from a renderer. An error that nothing in the renderer
+   * handled is written to the general log and to the runtime error log,
+   * without a dialog (requirement R99). A user notice, which tells the user
+   * that an operation did not complete, is logged as a warning and shown in a
+   * dialog with an OK button; while one such dialog is open, and for messages
+   * that already had a dialog during this run, it is only logged.
+   *
+   * @param   {BrowserWindow|null}  win     The window that sent the report
+   * @param   {RuntimeErrorReport}  report  The report
+   */
+  private reportRuntimeError (win: BrowserWindow|null, report: RuntimeErrorReport): void {
+    const windowName = win !== null && !win.isDestroyed() && win.getTitle() !== ''
+      ? win.getTitle()
+      : 'Unknown window'
+
+    if (report.userNotice !== true) {
+      this._logger.error(formatRuntimeErrorLogEntry(report, windowName))
+      this._logger.recordRuntimeError(toRuntimeErrorLogEntry(report, windowName))
+      return
+    }
+
+    this._logger.warning(`[Window Manager] [${windowName}] ${report.source ?? 'Notice'}: ${report.message}`)
+
+    if (!this._runtimeErrorNoticeGate.tryOpen(report.message)) {
+      return
+    }
+
+    const notice = formatUserNotice(report)
+    const boxOptions: MessageBoxOptions = {
+      type: 'warning',
+      title: notice.title,
+      message: notice.message,
+      detail: notice.detail,
+      buttons: [trans('Ok')],
+      defaultId: 0,
+      noLink: true
+    }
+
+    const shown = win !== null && !win.isDestroyed()
+      ? dialog.showMessageBox(win, boxOptions)
+      : dialog.showMessageBox(boxOptions)
+
+    shown
+      .catch(err => this._logger.error('[Window Manager] Could not show the notice dialog', err))
+      .finally(() => this._runtimeErrorNoticeGate.close())
   }
 }

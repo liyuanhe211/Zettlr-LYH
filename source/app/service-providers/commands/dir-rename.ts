@@ -51,6 +51,10 @@ export default class DirRename extends ZettlrCommand {
         this._app.config.removePath(sourceDir.path)
       }
 
+      // Zettlr-LYH internal file operations (C16, R121): renaming the folder must
+      // not be taken for a removal of its open files by another program
+      this._app.documents.registerInternalFileOperation(this._app.documents.getOpenFilesInDirectory(arg.path))
+
       await this._app.fsal.rename(arg.path, newPath)
       // Notify the documents provider so it can exchange any files if necessary
       await this._app.documents.hasMovedDir(arg.path, newPath)

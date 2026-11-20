@@ -77,6 +77,12 @@ export default class RequestMove extends ZettlrCommand {
       return false
     }
 
+    // Zettlr-LYH internal file operations (C16, R121): this move must not be
+    // taken for a removal of the open files by another program
+    this._app.documents.registerInternalFileOperation(
+      from.type === 'directory' ? this._app.documents.getOpenFilesInDirectory(from.path) : [from.path]
+    )
+
     // Now we can move the source to the target.
     await this._app.fsal.rename(from.path, newPath)
     // Notify the documents provider so it can exchange any files if necessary

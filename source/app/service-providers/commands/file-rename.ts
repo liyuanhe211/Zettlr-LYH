@@ -34,6 +34,15 @@ export default class FileRename extends ZettlrCommand {
    * @param  {any}     arg  An object containing hash of containing and name of new dir.
    */
   async run (evt: string, arg: { path: string, name: string }): Promise<void> {
+    // Zettlr-LYH scratch notes (R102): a Ctrl+N draft is renamed in place and
+    // stays a draft. It follows its own rules (it always counts as unsaved, only
+    // ever has the .md extension, and has no internal links to update), so none
+    // of the checks below apply to it.
+    if (this._app.documents.isScratchNote(arg.path)) {
+      await this._app.documents.renameScratchNote(arg.path, arg.name)
+      return
+    }
+
     // We need to prepare the name to be correct for
     // accurate checking whether or not the file
     // already exists
@@ -143,6 +152,10 @@ export default class FileRename extends ZettlrCommand {
       if (isRoot) {
         this._app.config.removePath(file.path)
       }
+
+      // Zettlr-LYH internal file operations (C16, R121): this rename must not be
+      // taken for a removal of the open file by another program
+      this._app.documents.registerInternalFileOperation([file.path])
 
       // Now, rename the file.
       await this._app.fsal.rename(file.path, newPath)

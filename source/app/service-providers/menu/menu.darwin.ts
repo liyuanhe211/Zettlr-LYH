@@ -218,6 +218,15 @@ export default function getMenu (
             (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'save-file')
           }
         },
+        // Zettlr-LYH save as (R48): save the current file under a new name
+        {
+          id: 'menu.save_as',
+          label: trans('Save As…'),
+          accelerator: 'Cmd+Shift+S',
+          click: function (_menuItem, focusedWindow) {
+            (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'save-file-as')
+          }
+        },
         {
           type: 'separator'
         },
@@ -310,7 +319,8 @@ export default function getMenu (
         {
           id: 'menu.rename_file',
           label: trans('Rename file'),
-          accelerator: 'Cmd+R',
+          // Zettlr-LYH (R108): Cmd+R is reserved for Revise Comments
+          accelerator: 'F2',
           click: function (_menuitem, focusedWindow) {
             (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'rename-file')
           }
@@ -518,6 +528,25 @@ export default function getMenu (
         {
           type: 'separator'
         },
+        // Zettlr-LYH split view (R44): a second view of the active file in a
+        // new pane next to the focused one
+        {
+          id: 'menu.split_editor_right',
+          label: 'Split Editor Right',
+          click: function (_menuitem, focusedWindow) {
+            (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'split-editor-right')
+          }
+        },
+        {
+          id: 'menu.split_editor_down',
+          label: 'Split Editor Down',
+          click: function (_menuitem, focusedWindow) {
+            (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'split-editor-down')
+          }
+        },
+        {
+          type: 'separator'
+        },
         // The Zoom menu items can be changed in function between GUI zooming
         // (using the zoom roles) and editor font size zooming (using a custom
         // callback)
@@ -621,6 +650,19 @@ export default function getMenu (
             (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'close-window')
           }
         },
+        // Zettlr-LYH reopen closed tab (R43): handled directly by the
+        // document manager in the main process
+        {
+          id: 'menu.tab_reopen_closed',
+          label: trans('Reopen Closed Tab'),
+          accelerator: sc('reopen-closed-tab'),
+          click: function (_menuitem, focusedWindow) {
+            const window = focusedWindow as BrowserWindow|undefined
+            const windowId = window !== undefined ? windows.getMainWindowKey(window) : undefined
+            documents.reopenClosedTab(windowId)
+              .catch(e => logger.error(`[Menu] Could not reopen the closed tab: ${String(e.message)}`, e))
+          }
+        },
         {
           id: 'menu.tab_previous',
           label: trans('Previous Tab'),
@@ -635,6 +677,18 @@ export default function getMenu (
           accelerator: sc('next-tab'),
           click: function (_menuitem, focusedWindow) {
             (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'next-tab')
+          }
+        },
+        {
+          type: 'separator'
+        },
+        // Zettlr-LYH Windows dialog (R72): the window manager lists, sorts,
+        // saves and closes the open documents of the main window
+        {
+          id: 'menu.windows_manager',
+          label: trans('Windows…'),
+          click: function (_menuitem, focusedWindow) {
+            (focusedWindow as BrowserWindow|undefined)?.webContents.send('shortcut', 'windows-manager')
           }
         },
         {
