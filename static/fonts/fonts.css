@@ -70,3 +70,16 @@
     font-style: normal;
     font-weight: bold;
 }
+
+/* YaHei Consolas Hybrid: Consolas Latin glyphs with Microsoft YaHei UI Chinese
+   glyphs, used for the text of the document tabs on Windows. Only an installed
+   copy is used: the font file is not in the repository because its license
+   does not allow redistribution. (When a local build ships the file, the main
+   process installs it for the current user, see
+   source/app/util/bundled-font-install.ts.) The font only has a regular weight. */
+@font-face {
+    font-family: "YaHei Consolas Hybrid";
+    src: local("YaHei Consolas Hybrid");
+    font-style: normal;
+    font-weight: normal;
+}
