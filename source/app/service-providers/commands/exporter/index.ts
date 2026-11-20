@@ -33,6 +33,8 @@ import { type PandocProfileMetadata } from '@providers/assets'
 import type ConfigProvider from '@providers/config'
 import { enableExtension, parseReaderWriter, readerWriterToString } from '@common/pandoc-util/parse-reader-writer'
 import { supportsExtension } from 'source/common/pandoc-util/pandoc-extensions'
+import { resolveShortcutImagesInSourceFiles } from './resolve-shortcut-images'
+import { resolveShortcutTarget } from 'source/app/util/windows-shortcut'
 
 /**
  * This function returns faux metadata for the custom export formats the
@@ -85,8 +87,54 @@ export async function makeExport (
   config: ConfigProvider,
   assets: AssetsProvider
 ): Promise<ExporterOutput> {
-  // We already know where the exported file will end up, so set the property
   const inputFiles = options.sourceFiles.map(file => file.path)
+
+  // Markdown images that link a Windows shortcut (.lnk) are exported with the
+  // image the shortcut points to: the links are rewritten in temporary copies
+  // of the source files. The image addresses are relative to the working
+  // directory of Pandoc. An unsaved document is exported from a temporary
+  // copy, so the folder of the original source file is used where there is no
+  // working directory.
+  const shortcutBaseDirectories = new Map<string, string>(inputFiles.map((file, index): [ string, string ] => {
+    return [ file, options.cwd ?? path.dirname(options.sourceFiles[index].path) ]
+  }))
+  let shortcutTemporaryDirectory: string|undefined
+
+  try {
+    const shortcutImages = await resolveShortcutImagesInSourceFiles(
+      inputFiles,
+      inputFile => shortcutBaseDirectories.get(inputFile) ?? path.dirname(inputFile),
+      shortcutPath => resolveShortcutTarget(shortcutPath),
+      app.getPath('temp')
+    )
+    shortcutTemporaryDirectory = shortcutImages.temporaryDirectory
+    if (shortcutImages.resolved > 0) {
+      logger.info(`[Exporter] Exporting with ${shortcutImages.resolved} shortcut image link(s) replaced by the images they point to`)
+    }
+    for (const shortcutPath of shortcutImages.unresolved) {
+      logger.warning(`[Exporter] Could not resolve the image shortcut ${shortcutPath}; its link stays unchanged in the export`)
+    }
+
+    return await runExporterPlugin(options, shortcutImages.inputFiles, logger, config, assets)
+  } finally {
+    if (shortcutTemporaryDirectory !== undefined) {
+      await fs.rm(shortcutTemporaryDirectory, { recursive: true, force: true }).catch((error: unknown) => {
+        logger.warning(`[Exporter] Could not delete the temporary directory ${shortcutTemporaryDirectory}`, error)
+      })
+    }
+  }
+}
+
+/**
+ * Runs the plugin that handles the export profile.
+ */
+async function runExporterPlugin (
+  options: ExporterOptions,
+  inputFiles: string[],
+  logger: LogProvider,
+  config: ConfigProvider,
+  assets: AssetsProvider
+): Promise<ExporterOutput> {
 
   // This is basically the "plugin API"
   const ctx: ExporterAPI = {

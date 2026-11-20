@@ -38,6 +38,7 @@ import { fileURLToPath } from 'url'
 import { trans } from '@common/i18n-main'
 import { formatTimestamp } from './export-formula-calculated'
 import { relativeImageURL } from 'source/app/util/relative-image-url'
+import { isShortcutPath, resolveShortcutTarget } from 'source/app/util/windows-shortcut'
 import {
   buildImageWarning,
   displayImagePath,
@@ -67,7 +68,7 @@ function resolveImageSource (source: string, documentDirectory: string): string|
 
   try {
     if (/^file:/i.test(trimmed)) {
-      return fileURLToPath(trimmed)
+      return followShortcut(fileURLToPath(trimmed))
     }
 
     const withoutProtocol = trimmed.replace(/^safe-file:\/\//i, '')
@@ -78,10 +79,24 @@ function resolveImageSource (source: string, documentDirectory: string): string|
       // Keep the raw source if it is not valid percent-encoding
     }
 
-    return path.isAbsolute(decoded) ? decoded : path.resolve(documentDirectory, decoded)
+    return followShortcut(path.isAbsolute(decoded) ? decoded : path.resolve(documentDirectory, decoded))
   } catch {
     return undefined
   }
+}
+
+/**
+ * Replaces the path of a Windows shortcut (.lnk) by the path of the image it
+ * points to, so that the image the shortcut stands for is embedded. A shortcut
+ * that cannot be resolved keeps its path, so that the export reports it like
+ * any other image that cannot be embedded.
+ *
+ * @param   {string}  absolutePath  The absolute path of the image link
+ *
+ * @return  {string}                The path of the real image, or absolutePath
+ */
+function followShortcut (absolutePath: string): string {
+  return isShortcutPath(absolutePath) ? (resolveShortcutTarget(absolutePath) ?? absolutePath) : absolutePath
 }
 
 /**

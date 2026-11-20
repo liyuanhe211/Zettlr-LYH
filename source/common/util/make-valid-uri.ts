@@ -22,6 +22,11 @@ import { isAbsolutePath, resolvePath } from './renderer-path-polyfill'
 const protocolRE = getProtocolRE()
 const linkRE = getLinkRE()
 const emailRe = /^[a-z0-9-.]+@[a-z0-9-.]+\.[a-z0-9-.]{2,}$/i
+// A Windows shortcut file ("figure.png.lnk"). It can be the address of an image,
+// which the main process resolves to the file the shortcut points to, so it is
+// a local file even though ".lnk" is no known file extension and the name looks
+// like a host name.
+const shortcutFileRE = /\.lnk$/i
 
 /**
  * Returns a valid URI, using the available context information
@@ -133,7 +138,7 @@ export default function makeValidUri (uri: string, base: string = ''): string {
       // In this case, it's not a file, but we don't care which
       // protocol it uses.
       isFile = false
-    } else if (linkRE.test(uri) && !hasAnyRecognizedFileExtension(uri)) {
+    } else if (linkRE.test(uri) && !hasAnyRecognizedFileExtension(uri) && !shortcutFileRE.test(uri)) {
       // NOTE: The regular expression will also test true for
       // relative paths without ./ at the beginning and a folder
       // containing a full stop. But remedification by adding ./

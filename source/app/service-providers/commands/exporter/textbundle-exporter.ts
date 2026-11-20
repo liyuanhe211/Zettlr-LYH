@@ -17,6 +17,7 @@ import {
   createWriteStream as writeStream
 } from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import { ZipArchive } from 'archiver'
 import { rimraf } from 'rimraf'
 import isFile from '@common/util/is-file'
@@ -46,7 +47,10 @@ export const plugin: ExporterPlugin = async function (options: ExporterOptions, 
       sourceFiles[0],
       targetPath,
       options.profile.writer === 'textpack',
-      path.basename(sourceFiles[0])
+      path.basename(sourceFiles[0]),
+      // The image addresses are relative to the working directory of the
+      // export, not to the folder of a temporary copy of the source file
+      options.cwd ?? path.dirname(options.sourceFiles[0].path)
     )
   } catch (err: unknown) {
     output.code = 1
@@ -61,16 +65,62 @@ export const plugin: ExporterPlugin = async function (options: ExporterOptions, 
 }
 
 /**
+ * Splits the text between the parentheses of a Markdown image, ![alt](text),
+ * into the address of the image and the destination, which is the part of the
+ * text that is replaced when the image is moved into the bundle. The
+ * destination is the address with its angle brackets, if it has any; the title
+ * behind it is neither. An address without angle brackets may contain spaces.
+ *
+ * For example, '<my image.png> "A title"' has the address 'my image.png' and
+ * the destination '<my image.png>'.
+ *
+ * @param   {string}  text  The text between the parentheses
+ *
+ * @return  {{ address: string, destination: string }}  The address and the destination
+ */
+function splitImageDestination (text: string): { address: string, destination: string } {
+  const angled = /^\s*(<([^>]*)>)/.exec(text)
+  if (angled !== null) {
+    return { address: angled[2], destination: angled[1] }
+  }
+
+  const titled = /^\s*(.*?)\s+(?:"[^"]*"|'[^']*')\s*$/.exec(text)
+  const address = titled !== null ? titled[1] : text.trim()
+  return { address, destination: address }
+}
+
+/**
+ * Returns the absolute path that an image address names.
+ *
+ * @param   {string}            address        The address of the image
+ * @param   {string}            baseDirectory  The folder relative addresses are relative to
+ *
+ * @return  {string|undefined}                 The absolute path, or undefined for a file URL that is no path
+ */
+function resolveImageAddress (address: string, baseDirectory: string): string|undefined {
+  if (/^file:/i.test(address)) {
+    try {
+      return fileURLToPath(address)
+    } catch {
+      return undefined
+    }
+  }
+
+  return path.resolve(baseDirectory, address)
+}
+
+/**
  * Creates a textbundle and returns the path to the created folder/file.
  *
  * @param   {string}           sourceFile        The source file to be packed
  * @param   {string}           targetFile        The target path
  * @param   {boolean}          textpack          Whether to create a textpack
  * @param   {string}           overrideFilename  An optional property to override the source file name in the info.json
+ * @param   {string}           baseDirectory     The folder the relative image addresses are relative to (by default the folder of the source file)
  *
  * @return  {Promise<string>}                    Resolves with a path to the file.
  */
-async function makeTextbundle (sourceFile: string, targetFile: string, textpack: boolean = false, overrideFilename?: string): Promise<string> {
+async function makeTextbundle (sourceFile: string, targetFile: string, textpack: boolean = false, overrideFilename?: string, baseDirectory: string = path.dirname(sourceFile)): Promise<string> {
   /*
    * We have to do the following (in order):
    * 1. Find all images in the Markdown file.
@@ -96,22 +146,29 @@ async function makeTextbundle (sourceFile: string, targetFile: string, textpack:
     await fs.mkdir(targetFile)
   }
 
-  const dirName = path.dirname(sourceFile)
   const imgRE = /!\[.*?\]\(([^)]+)\)/g
   const imagesToCopy: string[] = []
 
   // Read in the file and replace image paths, if applicable
   let content = await fs.readFile(sourceFile, 'utf8')
-  content = content.replace(imgRE, (match: string, url: string) => {
-    const absPath = path.resolve(dirName, url)
+  content = content.replace(imgRE, (match: string, text: string) => {
+    // The text may have angle brackets around the address and a title behind it
+    const { address, destination } = splitImageDestination(text)
+    const absPath = resolveImageAddress(address, baseDirectory)
 
     // We only care about images that are currently present on the filesystem.
-    if (isFile(absPath)) {
-      match = match.replace(url, path.join(ASSETS_FOLDER_NAME, path.basename(url)))
-      imagesToCopy.push(absPath)
+    if (absPath === undefined || !isFile(absPath)) {
+      return match
     }
 
-    return match
+    imagesToCopy.push(absPath)
+    const fileName = path.basename(absPath)
+    const assetAddress = `${ASSETS_FOLDER_NAME}/${fileName}`
+    const newDestination = /[\s()]/.test(fileName) ? `<${assetAddress}>` : assetAddress
+
+    // The text is the end of the match, up to the closing parenthesis
+    const destinationStart = match.length - 1 - text.length + text.indexOf(destination)
+    return match.slice(0, destinationStart) + newDestination + match.slice(destinationStart + destination.length)
   })
 
   // Write the file into the target directory

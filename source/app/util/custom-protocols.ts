@@ -15,6 +15,7 @@ import type LogProvider from '@providers/log'
 import { protocol } from 'electron'
 import { promises as fs, constants as FSConstants } from 'fs'
 import path from 'path'
+import { isShortcutPath, resolveShortcutTarget } from './windows-shortcut'
 
 // Reference if we need more: https://www.iana.org/assignments/media-types/media-types.xhtml
 const CONTENT_TYPE_MAP = new Map([
@@ -81,6 +82,17 @@ export default function registerCustomProtocols (logger: LogProvider): void {
         } else {
           return new Response(null, { status: 404, statusText: 'File not found' })
         }
+      }
+
+      // A Windows shortcut (e.g. an image link "figure.png.lnk") is replaced by
+      // the file it points to
+      if (isShortcutPath(pathName)) {
+        const shortcutTarget = resolveShortcutTarget(pathName)
+        if (shortcutTarget === undefined) {
+          logger.warning(`Could not resolve the shortcut ${pathName} to an existing file`)
+          return new Response(null, { status: 404, statusText: 'File not found' })
+        }
+        pathName = shortcutTarget
       }
 
       // File must be visible to the process and readable
