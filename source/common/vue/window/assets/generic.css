@@ -42,6 +42,19 @@ body.dark {
   --zettlr-caution-bg: rgba(80, 10, 10, 0.6);
 }
 
+/* Keep the development error page below the native Windows controls. Moving
+   the iframe also moves its Dismiss button, which lives in another document. */
+body.win32 iframe#webpack-dev-server-client-overlay {
+  top: max(35px, env(titlebar-area-height, 35px)) !important;
+  height: calc(100vh - max(35px, env(titlebar-area-height, 35px))) !important;
+  -webkit-app-region: no-drag;
+}
+
+body.win32.fullscreen iframe#webpack-dev-server-client-overlay {
+  top: 0 !important;
+  height: 100vh !important;
+}
+
 /* Generic styles that apply to all platforms */
 body {
   label {

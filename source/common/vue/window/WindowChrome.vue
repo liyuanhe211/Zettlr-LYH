@@ -17,6 +17,7 @@
       ></WindowTitlebar>
       <WindowMenubar
         v-if="showMenubar"
+        v-bind:center-title="props.menubarCenterTitle"
       ></WindowMenubar>
       <WindowToolbar
         v-if="props.showToolbar && props.toolbarControls !== undefined"
@@ -27,6 +28,12 @@
         v-on:click="emit('toolbar-click', $event)"
         v-on:dblclick="handleDoubleClick('toolbar')"
       ></WindowToolbar>
+      <!--
+        Zettlr-LYH (R174): a row below the toolbar, filled by the main window
+        with its formatting bar. A window that passes nothing here renders
+        nothing and keeps its appearance.
+      -->
+      <slot name="toolbar-second-row"></slot>
       <WindowTabbar
         v-if="props.showTabbar && props.tabbarTabs !== undefined"
         v-bind:tabs="props.tabbarTabs"
@@ -98,6 +105,9 @@ const props = defineProps<{
   titlebar?: boolean
   // Should show a menubar if adequate?
   menubar?: boolean
+  // Zettlr-LYH (R85): the title in the middle of the menubar (see
+  // WindowMenubar.vue); leaves document.title untouched
+  menubarCenterTitle?: { text: string, isPath: boolean }
   // Show the toolbar?
   showToolbar?: boolean
   // Show labels under the toolbar icons?
