@@ -29,6 +29,7 @@ export enum DocumentType {
   YAML,
   JSON,
   JSONL,
+  TOML,
 }
 
 /**
@@ -71,6 +72,69 @@ export interface BranchNodeJSON {
   sizes: number[]
 }
 
+/** Metadata only: comparison contents remain private to the owning window. */
+export interface ConflictReadOnlySession {
+  filePath: string
+  sessionId: string
+  windowId: string
+  leafId: string
+}
+
+/** One authority revision shared by live events and initial snapshots. */
+export interface ConflictReadOnlySnapshot {
+  revision: number
+  sessions: ConflictReadOnlySession[]
+}
+
+/**
+ * Zettlr-LYH undo history (R135, spec C20): a CodeMirror ChangeSet in its JSON
+ * form, as the undo history store writes it.
+ */
+export type UndoChangeSetJSON = Array<number | [number, ...string[]]>
+
+/**
+ * Zettlr-LYH undo history (R135): an EditorSelection in its JSON form.
+ */
+export interface UndoSelectionJSON {
+  ranges: Array<{ anchor: number, head: number }>
+  main: number
+}
+
+/**
+ * Zettlr-LYH undo history (R135, spec C20 section 7): the change that turned
+ * the previous text of a document into the text it was reloaded with after an
+ * external modification. get-document returns it as long as the document has
+ * not changed since; the editor turns it into an undoable step.
+ */
+export interface DocumentExternalStep {
+  forward: UndoChangeSetJSON
+  inverse: UndoChangeSetJSON
+  oldLength: number
+  source: 'disk-reload'|'comparison'
+}
+
+/**
+ * Zettlr-LYH undo history (R135): one event of the done branch of a CodeMirror
+ * history, in its JSON form.
+ */
+export interface UndoHistoryEventJSON {
+  changes: UndoChangeSetJSON
+  startSelection: UndoSelectionJSON
+  selectionsAfter: []
+}
+
+/**
+ * Zettlr-LYH undo history (R135, spec C20 section 7): what the
+ * get-undo-history command of the documents-provider returns (or null).
+ * externalEventIndexes are the indexes in done of the events that stem from
+ * external modifications.
+ */
+export interface UndoHistoryResult {
+  version: number
+  history: { done: UndoHistoryEventJSON[], undone: [] }
+  externalEventIndexes: number[]
+}
+
 /**
  * This enumeration contains events emitted by the DocumentsProvider across main
  * and renderer processes
@@ -79,7 +143,18 @@ export enum DP_EVENTS {
   // Opening/closing of files
   OPEN_FILE = 'file-opened',
   CLOSE_FILE = 'file-closed',
+  FILE_PATH_CHANGED = 'file-path-changed',
   FILE_REMOTELY_CHANGED = 'file-remotely-changed',
+  // Zettlr-LYH conflict merge (R47): the user chose "Compare and Merge…" in the
+  // "file modified on disk" dialog; the main window should open the merge view
+  FILE_CONFLICT_MERGE = 'file-conflict-merge',
+  FILE_CONFLICT_MERGE_ENDED = 'file-conflict-merge-ended',
+  // Zettlr-LYH disk conflicts (R138): a file without unsaved changes has been
+  // reloaded from disk automatically; the pane showing it displays a notice
+  FILE_RELOADED_FROM_DISK = 'file-reloaded-from-disk',
+  // Zettlr-LYH disk conflicts (R138): the file being compared has changed on
+  // disk again; the comparison view fetches the new disk version
+  FILE_CONFLICT_DISK_CHANGED = 'file-conflict-disk-changed',
   FILES_SORTED = 'files-sorted',
   // File status (pinned, modified, ...)
   CHANGE_FILE_STATUS = 'file-status-changed',

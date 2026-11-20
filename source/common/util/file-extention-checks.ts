@@ -21,7 +21,8 @@ export const LATEX_EXT = [ '.tex', '.latex' ]
 export const YAML_EXT = [ '.yaml', '.yml' ]
 export const JSON_EXT = ['.json']
 export const JSONL_EXT = ['.jsonl']
-export const CODE_EXT = [ ...LATEX_EXT, ...YAML_EXT, ...JSON_EXT, ...JSONL_EXT, '.dic' ]
+export const TOML_EXT = ['.toml']
+export const CODE_EXT = [ ...LATEX_EXT, ...YAML_EXT, ...JSON_EXT, ...JSONL_EXT, ...TOML_EXT, '.dic' ]
 export const IMG_EXT = [ '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.tiff' ]
 export const PDF_EXT = ['.pdf']
 export const MS_OFFICE_EXT = [ '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx' ]
@@ -59,7 +60,7 @@ export function hasMdOrCodeExt (p: string): boolean {
  * @return  {boolean}               Whether the file has one of these extensions
  */
 export function hasExt (filePath: string, extensions: string[]): boolean {
-  return extensions.some(ext => filePath.endsWith(ext))
+  return extensions.some(ext => filePath.endsWith(ext) || (ext === '.toml' && filePath.toLowerCase().endsWith(ext)))
 }
 
 /**
@@ -95,6 +96,10 @@ export function hasJSONOrJSONLinesExt (filePath: string): boolean {
   return hasExt(filePath, [ ...JSON_EXT, ...JSONL_EXT ])
 }
 
+export function hasTOMLExt (filePath: string): boolean {
+  return hasExt(filePath, TOML_EXT)
+}
+
 /**
  * Has the given path a valid Image file extension?
  *
@@ -114,7 +119,7 @@ export function hasImageExt (filePath: string): boolean {
  * @return  {boolean}            True or false
  */
 export function hasPDFExt (filePath: string): boolean {
-  return hasExt(filePath, PDF_EXT)
+  return hasExt(filePath.toLowerCase(), PDF_EXT)
 }
 
 /**
@@ -181,6 +186,8 @@ export function getExtensionForDocumentType (type: DocumentType): string {
       return '.json'
     case DocumentType.JSONL:
       return '.jsonl'
+    case DocumentType.TOML:
+      return '.toml'
   }
 }
 
@@ -212,5 +219,9 @@ export function getDocumentTypeForExtension (filePath: string): DocumentType|und
 
   if (hasExt(filePath, JSONL_EXT)) {
     return DocumentType.JSONL
+  }
+
+  if (hasTOMLExt(filePath)) {
+    return DocumentType.TOML
   }
 }

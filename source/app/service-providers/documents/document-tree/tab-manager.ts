@@ -26,12 +26,18 @@ export class TabManager {
   private _activeFile: OpenDocument|null
   private readonly _sessionHistory: string[]
   private _sessionPointer: number
+  // Zettlr-LYH (R90): The activation order of this pane, i.e. the paths of the
+  // files that have been the active tab, with the most recent activation at
+  // the end. Every path appears at most once. It is kept in memory only and is
+  // independent of the session history (which serves back/forward navigation).
+  private _activationOrder: string[]
 
   constructor () {
     this._openFiles = []
     this._activeFile = null
     this._sessionHistory = []
     this._sessionPointer = -1
+    this._activationOrder = []
   }
 
   // GETTERS AND SETTERS
@@ -128,14 +134,23 @@ export class TabManager {
    *
    * @param   {string}   filePath       The absolute file path
    * @param   {boolean}  modifyHistory  Optional. Only used internally.
+   * @param   {boolean}  insertAfterActiveTab  Place a file-manager request next to the active tab.
    *
    * @return  {Promise<boolean>}        True upon successful opening
    */
-  public openFile (filePath: string, modifyHistory?: boolean): boolean {
+  public openFile (filePath: string, modifyHistory?: boolean, insertAfterActiveTab = false): boolean {
     if (this.activeFile?.path === filePath) {
       return false
     }
     const openFile = this._openFiles.find(file => file.path === filePath)
+
+    // Zettlr-LYH (R90): Calls with modifyHistory === false that do not come
+    // from back/forward navigation (restoring tabs on startup, temporarily
+    // showing a scratch note) are no user activations, so they must not touch
+    // the activation order. Back/forward navigation records its activations
+    // itself in _moveThroughHistory().
+    const recordActivation = modifyHistory !== false
+    const previousActivePath = this._activeFile?.path ?? null
 
     // Remove the file from the session history if applicable
     if (modifyHistory !== false) {
@@ -145,26 +160,28 @@ export class TabManager {
       }
     }
 
-    // If the file is already open, we just set it as the active one and be done
-    // with it, no further action needed
+    // File-manager requests may reposition an existing tab before activating it.
     if (openFile !== undefined) {
+      if (insertAfterActiveTab) {
+        this.moveFileAfterActive(filePath)
+      }
       if (modifyHistory !== false) {
         this._sessionHistory.push(filePath)
         this._sessionPointer = this._sessionHistory.length - 1
       }
       this.activeFile = openFile
+      if (recordActivation) {
+        this._recordActivation(filePath, previousActivePath)
+      }
       return true
     }
 
     const file: OpenDocument = { path: filePath, pinned: false }
 
-    if (this._activeFile !== null) {
-      // ... behind our active file
-      const idx = this._openFiles.indexOf(this._activeFile)
-      this._openFiles.splice(idx + 1, 0, file)
-    } else {
-      // ... or at the end
-      this._openFiles.push(file)
+    // Other opening and restoration paths retain their existing append order.
+    this._openFiles.push(file)
+    if (insertAfterActiveTab) {
+      this.moveFileAfterActive(filePath)
     }
 
     // Update all required states. Especially make sure to re-sort this to
@@ -175,12 +192,70 @@ export class TabManager {
 
     this.activeFile = file
 
+    if (recordActivation) {
+      this._recordActivation(filePath, previousActivePath)
+    }
+
     if (modifyHistory !== false) {
       this._sessionHistory.push(filePath)
       this._sessionPointer = this._sessionHistory.length - 1
     }
 
     return true
+  }
+
+  /**
+   * Positions an open tab after the previous active tab, within the existing
+   * pinned grouping. Remove the target before finding the insertion index so
+   * moving a tab from either side does not shift the anchor incorrectly.
+   */
+  private moveFileAfterActive (filePath: string): void {
+    const activePath = this._activeFile?.path
+    if (activePath === undefined || activePath === filePath) {
+      return
+    }
+    const order = this._openFiles.map(file => file.path).filter(path => path !== filePath)
+    const activeIndex = order.indexOf(activePath)
+    if (activeIndex < 0) {
+      return
+    }
+    order.splice(activeIndex + 1, 0, filePath)
+    this.sortOpenFiles(order)
+  }
+
+  /**
+   * Zettlr-LYH (R90): Records that the given file has just become the active
+   * tab of this pane. A path appears only once in the activation order, so any
+   * earlier record of it is removed first.
+   *
+   * If the file that was active before is not in the activation order yet (for
+   * example because it was restored on startup), it is recorded first so that
+   * closing the new active tab always switches back to the tab that was shown
+   * before.
+   *
+   * @param  {string}       filePath          The file that became active
+   * @param  {string|null}  previousFilePath  The file that was active before
+   */
+  private _recordActivation (filePath: string, previousFilePath: string|null = null): void {
+    if (previousFilePath !== null && !this._activationOrder.includes(previousFilePath)) {
+      this._activationOrder.push(previousFilePath)
+    }
+
+    this._removeFromActivationOrder(filePath)
+    this._activationOrder.push(filePath)
+  }
+
+  /**
+   * Zettlr-LYH (R90): Removes the given path from the activation order, if it
+   * is in there.
+   *
+   * @param  {string}  filePath  The path to remove
+   */
+  private _removeFromActivationOrder (filePath: string): void {
+    const index = this._activationOrder.indexOf(filePath)
+    if (index > -1) {
+      this._activationOrder.splice(index, 1)
+    }
   }
 
   /**
@@ -217,6 +292,9 @@ export class TabManager {
     // Then remove the file from the list of open files
     this._openFiles.splice(this._openFiles.indexOf(file), 1)
 
+    // Zettlr-LYH (R90): A closed tab is no longer a candidate to switch back to
+    this._removeFromActivationOrder(file.path)
+
     // Now, if we just closed the active file, we need to make another file
     // active, or none, if there are no more open files active.
     if (!isActive) {
@@ -225,6 +303,18 @@ export class TabManager {
       this.activeFile = null
     }
 
+    // Zettlr-LYH (R90): Switch back to the tab that was activated most recently
+    // and is still open, regardless of whether it is adjacent to the closed one.
+    for (let i = this._activationOrder.length - 1; i >= 0; i--) {
+      const candidate = this._openFiles.find(doc => doc.path === this._activationOrder[i])
+      if (candidate !== undefined) {
+        this.activeFile = candidate
+        return true
+      }
+    }
+
+    // Nothing recorded (e.g., after a restart, before any tab has been
+    // switched): fall back to the neighbor on the left.
     if (this._openFiles.length > 0 && activeFileIdx > 0) {
       this.activeFile = this._openFiles[activeFileIdx - 1]
     } else if (this._openFiles.length > 0 && activeFileIdx === 0) {
@@ -250,6 +340,11 @@ export class TabManager {
       console.log(`Didnt find file for path ${oldPath} -- nothing has changed.`, this.openFiles.map(doc => doc.path))
       return false
     }
+
+    // Zettlr-LYH (R90): The activation order follows the renamed file; should
+    // the new path already be in there, only its latest position is kept.
+    const renamedOrder = this._activationOrder.map(path => path === oldPath ? newPath : path)
+    this._activationOrder = renamedOrder.filter((path, index) => renamedOrder.lastIndexOf(path) === index)
 
     file.path = newPath
     if (this.activeFile?.path === oldPath) {
@@ -295,7 +390,12 @@ export class TabManager {
     const pathToOpen = this._sessionHistory[this._sessionPointer]
 
     // Open that file, but tell the opener explicitly not to modify the state
-    this.openFile(pathToOpen, false)
+    const previousActivePath = this._activeFile?.path ?? null
+    if (this.openFile(pathToOpen, false)) {
+      // Zettlr-LYH (R90): Navigating back or forward does not change the
+      // session history, but it is a user activation of that tab
+      this._recordActivation(pathToOpen, previousActivePath)
+    }
   }
 
   /**
