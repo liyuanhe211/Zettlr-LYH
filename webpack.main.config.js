@@ -2,6 +2,7 @@ const CopyWebpackPlugin = require('copy-webpack-plugin')
 const { DefinePlugin } = require('webpack')
 const path = require('path')
 const rules = require('./webpack.rules')
+const { persistentCache, AssetRelocatorCachePlugin } = require('./webpack.cache')
 
 const externals = {}
 
@@ -18,8 +19,10 @@ module.exports = {
   // Main entry point: the file that runs in the main process
   entry: './source/main.ts',
   mode: process.env.NODE_ENV === 'production' ? 'production' : 'development',
+  cache: persistentCache(__filename),
   module: { rules },
   plugins: [
+    new AssetRelocatorCachePlugin(),
     new CopyWebpackPlugin({
       patterns: [
         // These are all static files that simply need to be bundled with the
@@ -39,7 +42,7 @@ module.exports = {
     new DefinePlugin({
       __GIT_COMMIT_HASH__: JSON.stringify(process.env.GIT_COMMIT_HASH),
       __BUILD_DATE__: JSON.stringify((new Date()).toISOString()),
-      __UPDATES_DISABLED__: JSON.stringify(process.env.ZETTLR_DISABLE_UPDATE_CHECK !== undefined ? '1' : '0')
+      __UPDATES_DISABLED__: JSON.stringify('1') // Zettlr-LYH requirement R95: never update from upstream Zettlr; see source/app/service-providers/updates/update-source.ts
     })
   ],
   resolve: {

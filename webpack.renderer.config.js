@@ -1,12 +1,44 @@
 const rules = require('./webpack.rules')
 const path = require('path')
 
+const CopyWebpackPlugin = require('copy-webpack-plugin')
 const { VueLoaderPlugin } = require('vue-loader')
 const { DefinePlugin } = require('webpack')
+// The renderer bundles never load relocated native modules, so unlike the main
+// process they need no AssetRelocatorCachePlugin
+const { persistentCache } = require('./webpack.cache')
+
+// Zettlr-LYH R59: pdf.js loads its worker script and data files at run time
+// by URL. They are copied unchanged into the folder pdfjs/ of the renderer
+// output, next to the window folders, where the PDF viewer looks for them
+// (source/win-main/file-viewers/pdf-viewer/pdfjs.ts). The files are already
+// minified, so the minimizer skips them.
+const pdfjsDistribution = path.resolve(__dirname, 'node_modules/pdfjs-dist')
+const pdfjsAssetInfo = { minimized: true }
 
 const plugins = [
   // Apply webpack rules to the corresponding language blocks in .vue files
   new VueLoaderPlugin(),
+
+  new CopyWebpackPlugin({
+    patterns: [
+      { from: path.join(pdfjsDistribution, 'build/pdf.worker.min.mjs'), to: 'pdfjs/pdf.worker.min.mjs', info: pdfjsAssetInfo },
+      { from: path.join(pdfjsDistribution, 'cmaps'), to: 'pdfjs/cmaps', info: pdfjsAssetInfo },
+      { from: path.join(pdfjsDistribution, 'standard_fonts'), to: 'pdfjs/standard_fonts', info: pdfjsAssetInfo },
+      {
+        from: path.join(pdfjsDistribution, 'wasm'),
+        to: 'pdfjs/wasm',
+        info: pdfjsAssetInfo,
+        // QuickJS only runs the JavaScript embedded in PDFs, which the viewer
+        // does not enable
+        globOptions: { ignore: ['**/quickjs-eval.*'] }
+      },
+      { from: path.join(pdfjsDistribution, 'iccs'), to: 'pdfjs/iccs', info: pdfjsAssetInfo },
+      // Icons of PDF annotations such as notes and attachments (the viewer's
+      // imageResourcesPath)
+      { from: path.join(pdfjsDistribution, 'web/images'), to: 'pdfjs/images', info: pdfjsAssetInfo }
+    ]
+  }),
 
   // Set a few Vue 3 options; see: http://link.vuejs.org/feature-flags
   new DefinePlugin({
@@ -19,7 +51,7 @@ const plugins = [
     // such as '"production"', or by using JSON.stringify('production')."
     __GIT_COMMIT_HASH__: JSON.stringify(process.env.GIT_COMMIT_HASH),
     __BUILD_DATE__: JSON.stringify((new Date()).toISOString()),
-    __UPDATES_DISABLED__: JSON.stringify(process.env.ZETTLR_DISABLE_UPDATE_CHECK !== undefined ? '1' : '0')
+    __UPDATES_DISABLED__: JSON.stringify('1') // Zettlr-LYH requirement R95: never update from upstream Zettlr; see source/app/service-providers/updates/update-source.ts
   })
 ]
 
@@ -35,6 +67,7 @@ rules.push({
 })
 
 module.exports = {
+  cache: persistentCache(__filename),
   module: { rules },
   // The following line of code serves two purposes: While we're in develop
   // (NODE_ENV = develop), emit source maps so we have an easy time finding the

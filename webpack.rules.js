@@ -21,6 +21,10 @@ module.exports = [
   },
   {
     test: /\.(m?js|node)$/,
+    // Zettlr-LYH R59: pdf.js ships self-contained ES modules without native
+    // assets; keep the relocator, which statically evaluates `import.meta.url`
+    // and `new URL()` expressions, away from them
+    exclude: /[\\/]node_modules[\\/]pdfjs-dist[\\/]/,
     parser: { amd: false },
     use: {
       loader: '@vercel/webpack-asset-relocator-loader',
