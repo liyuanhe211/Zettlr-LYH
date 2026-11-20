@@ -14,11 +14,14 @@
  */
 
 import { app } from 'electron'
+// NOTE: Imported on a line of its own so that the line above stays as it is
+import { crashReporter } from 'electron'
+import { existsSync } from 'fs'
 import path from 'path'
 import { bootApplication, shutdownApplication } from './app/lifecycle'
 
 // Helper function to extract files to open from process.argv
-import extractFilesFromArgv from './app/util/extract-files-from-argv'
+import extractFilesFromArgv, { extractFilesToCloseFromArgv } from './app/util/extract-files-from-argv'
 import {
   DATA_DIR,
   DISABLE_HARDWARE_ACCELERATION,
@@ -69,7 +72,22 @@ if (!app.requestSingleInstanceLock()) {
   app.exit(0)
 }
 
+// Zettlr-LYH close tab from the command line: a request to close files
+// (`--close-file=<path>`) is only meant for a running instance. If none runs,
+// there is no tab to close, so nothing happens and the app does not start.
+if (extractFilesToCloseFromArgv(process.argv).length > 0) {
+  app.exit(0)
+}
+
 // If we reach this point, we are now booting the first instance of Zettlr.
+
+// Zettlr-LYH: Keep a dump of every crash of this app's processes on this
+// computer, in app.getPath('crashDumps'). Nothing is ever uploaded. Without a
+// connected crash handler, a crashed renderer only reports the exit code
+// -36861 (Crashpad's "not connected to handler") instead of its real
+// exception. Electron requires this call before the app is ready, and after
+// the userData path is set, since the dump directory lies inside it.
+crashReporter.start({ uploadToServer: false })
 
 // To show notifications properly on Windows, we must manually set the appUserModelID
 // See https://www.electronjs.org/docs/tutorial/notifications#windows
@@ -79,6 +97,28 @@ if (!app.requestSingleInstanceLock()) {
 // a regular Zettlr installation running alongside it.
 if (process.platform === 'win32') {
   app.setAppUserModelId('com.zettlr.lyh.app')
+
+  if (!app.isPackaged) {
+    const launcherPath = path.resolve(__dirname, '../../Zettlr_LYH.exe')
+    app.on('browser-window-created', (_event, window) => {
+      // NOTE: Unpackaged, Electron's notification support writes the Start
+      // menu shortcut Electron.lnk for the process ID 'com.zettlr.lyh.app';
+      // it points to electron.exe and carries its icon. The taskbar takes a
+      // window's icon from a shortcut with the window's ID before anything
+      // else, so the windows get an ID of their own that no shortcut claims.
+      // The taskbar then shows the icon given here, and pinning a window pins
+      // the launcher, which preserves the development startup flow.
+      window.setAppDetails({
+        appId: 'com.zettlr.lyh.window',
+        appIconPath: path.join(__dirname, 'assets/icons/icon.ico'),
+        appIconIndex: 0,
+        ...(existsSync(launcherPath) ? {
+          relaunchCommand: `"${launcherPath}"`,
+          relaunchDisplayName: 'Zettlr-LYH'
+        } : {})
+      })
+    })
+  }
 }
 
 // On systems with virtual GPUs (i.e. VMs), it might be necessary to disable
@@ -161,6 +201,27 @@ app.whenReady().then(() => {
  * @param {String} cwd The current working directory
  */
 app.on('second-instance', (event, argv, _cwd) => {
+  // Zettlr-LYH close tab from the command line: another program asks to close
+  // the tabs of some files. Close each one that has no unsaved changes, and do
+  // nothing else: no window is shown or focused, and nothing is opened.
+  const filesToClose = extractFilesToCloseFromArgv(argv)
+  if (filesToClose.length > 0) {
+    if (!isAppServiceContainerReady()) {
+      return // Still booting: no tab is open yet
+    }
+    const serviceContainer = getAppServiceContainer()
+    for (const filePath of filesToClose) {
+      serviceContainer.documents.closeFileIfUnmodified(filePath)
+        .then(closed => {
+          serviceContainer.log.info(`[Application] Command line request to close ${filePath}: ${closed ? 'closed' : 'not open or has unsaved changes, left alone'}`)
+        })
+        .catch(err => {
+          serviceContainer.log.error(`[Application] Could not close ${filePath} as requested from the command line`, err)
+        })
+    }
+    return
+  }
+
   if (!isAppServiceContainerReady()) {
     // NOTE: Upstream drops the files here. This fork's Zettlr_LYH.exe launcher
     // may hand files over while the app is still booting (e.g., when several
@@ -254,12 +315,72 @@ app.on('activate', function () {
 })
 
 /**
+ * Turns whatever was thrown or rejected into a message and, if available, a
+ * stack trace.
+ *
+ * @param   {unknown}  reason  The thrown value or the rejection reason
+ *
+ * @return  {{ message: string, stack?: string }}  The message and the stack trace
+ */
+function describeMainProcessError (reason: unknown): { message: string, stack?: string } {
+  if (reason instanceof Error) {
+    return { message: `${reason.name}: ${reason.message}`, stack: reason.stack }
+  }
+
+  if (typeof reason === 'string') {
+    return { message: reason }
+  }
+
+  try {
+    return { message: JSON.stringify(reason) ?? String(reason) }
+  } catch (_err) {
+    return { message: String(reason) }
+  }
+}
+
+/**
+ * Writes an error that nothing in the main process handled to the general log
+ * and to the runtime error log (requirement R99), without a dialog. Before the
+ * service container is ready, it only goes to the console. This must never
+ * throw, since it runs inside the handlers for uncaught errors.
+ *
+ * @param   {string}   description  The general log's description of the error
+ * @param   {'unhandledrejection'|'uncaughtException'}  kind  The kind of error
+ * @param   {unknown}  reason       The thrown value or the rejection reason
+ */
+function recordMainProcessError (
+  description: string,
+  kind: 'unhandledrejection'|'uncaughtException',
+  reason: unknown
+): void {
+  try {
+    if (!isAppServiceContainerReady()) {
+      console.error(description, reason)
+      return
+    }
+
+    const { log } = getAppServiceContainer()
+    log.error(description, reason)
+    const { message, stack } = describeMainProcessError(reason)
+    log.recordRuntimeError({ process: 'main', window: 'main', kind, message, stack })
+  } catch (err) {
+    console.error(description, reason, err)
+  }
+}
+
+/**
  * Hook into the unhandledRejection-event to prevent nasty error messages when
  * a Promise is rejected somewhere.
  */
 process.on('unhandledRejection', (err: unknown) => {
-  // Just log to console.
-  if (isAppServiceContainerReady()) {
-    getAppServiceContainer().log.error('[Application] Unhandled rejection received', err)
-  }
+  recordMainProcessError('[Application] Unhandled rejection received', 'unhandledrejection', err)
+})
+
+/**
+ * Take over uncaught exceptions, so that Electron does not show its "A
+ * JavaScript error occurred in the main process" dialog. The error is logged
+ * silently and the application keeps running (requirement R99).
+ */
+process.on('uncaughtException', (err: Error) => {
+  recordMainProcessError('[Application] Uncaught exception received', 'uncaughtException', err)
 })
