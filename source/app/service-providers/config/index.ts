@@ -22,16 +22,19 @@ import safeAssign from '@common/util/safe-assign'
 import isDir from '@common/util/is-dir'
 import broadcastIpcMessage from '@common/util/broadcast-ipc-message'
 import { getConfigTemplate, type ConfigOptions } from './get-config-template'
+import { isOwnConfigKey, resolveOwnConfigPath, findOwnConfigParent } from './own-config-path'
 import enumDictFiles from '@common/util/enum-dict-files'
 import ProviderContract from '../provider-contract'
 import type LogProvider from '../log'
 import { loadData, trans } from '@common/i18n-main'
 import isFile from '@common/util/is-file'
-import { hasMdOrCodeExt } from '@common/util/file-extention-checks'
+import { hasMdOrCodeExt, hasPDFExt } from '@common/util/file-extention-checks'
 import { ignorePath } from '@common/util/ignore-path'
-import { updateOpenHistory, OPEN_HISTORY_LIMIT } from '@common/util/open-history'
+import { updateOpenHistory, appendMissingToOpenHistory, OPEN_HISTORY_LIMIT } from '@common/util/open-history'
 import { showOnboardingWindow } from './onboarding-window'
 import { DateTime } from 'luxon'
+import { normalizeCopyVisibleTextCategories } from '@common/modules/markdown-editor/util/visible-copy-policy'
+import { isCharacterPairSettingsUpdate, normalizeCharacterPairSettings } from '@common/modules/markdown-editor/util/character-pair-policy'
 
 const ZETTLR_VERSION = app.getVersion()
 
@@ -118,7 +121,10 @@ export default class ConfigProvider extends ProviderContract {
     this._emitter = new EventEmitter() // Initiate the emitter
 
     this.config = getConfigTemplate()
-    this._rules = [] // This array holds all validation rules
+    // This array holds all validation rules. They are built here rather than
+    // in boot() so that set() validates values from the moment the provider
+    // exists.
+    this._rules = VALIDATE_PROPERTIES.map((option, i) => new ValidationRule(option, VALIDATE_RULES[i]))
     this._firstStart = false // Only true if a config file has been created
     this._newVersion = false // True if the last read config had a different version
 
@@ -174,10 +180,14 @@ export default class ConfigProvider extends ProviderContract {
     this._logger.verbose('Config provider booting up ...')
 
     if (!await this._container.isInitialized()) {
-      this._logger.info('No configuration detected: Assuming first start and new version!')
-      // The config is not yet initialized, so we know this is a firstStart.
-      this._firstStart = true
-      this._newVersion = true
+      if (this._container.recovery === undefined) {
+        this._logger.info('No configuration detected: Assuming first start and new version!')
+        // The config is not yet initialized, so we know this is a firstStart.
+        this._firstStart = true
+        this._newVersion = true
+      }
+      // Otherwise config.json existed but was unreadable and no backup copy
+      // could replace it: start from the defaults (reported below).
       await this._container.init(this.config)
     } else {
       this._logger.verbose('Loading configuration ...')
@@ -218,8 +228,18 @@ export default class ConfigProvider extends ProviderContract {
       }
     }
 
+    // Enable Markdown line numbers once for configurations carrying the old
+    // default. Subsequent starts preserve an explicitly disabled preference.
+    if (this.config.markdownLineNumbersMigrated !== true) {
+      this.config.editor.showMarkdownLineNumbers = true
+      this.config.markdownLineNumbersMigrated = true
+      this._container.set(this.config)
+    }
+
     // Remove potential dead links to non-existent files and dirs
     this.checkPaths()
+
+    this.reportConfigRecovery()
 
     // Immediately begin loading the translation strings. These have to be
     // available directly after the config has been loaded.
@@ -230,15 +250,41 @@ export default class ConfigProvider extends ProviderContract {
       this.config.appLang = file.tag
     }
 
-    // Boot up the validation rules
-    for (let i = 0; i < VALIDATE_RULES.length; i++) {
-      this._rules.push(new ValidationRule(VALIDATE_RULES[i], VALIDATE_PROPERTIES[i]))
-    }
-
     // Now for the fun part: Show a brand new onboarding experience.
     if (this._firstStart || this._newVersion) {
       await showOnboardingWindow(this, this._logger, this._firstStart ? 'first-start' : 'update')
     }
+  }
+
+  /**
+   * Tells the user if config.json was unreadable at startup (for example
+   * after a crash turned it into zero bytes) and how it was replaced. The
+   * message box does not block the startup.
+   */
+  private reportConfigRecovery (): void {
+    const recovery = this._container.recovery
+    if (recovery === undefined) {
+      return
+    }
+
+    const keptAs = recovery.corruptedCopyPath !== undefined
+      ? `The unreadable file was kept as:\n${recovery.corruptedCopyPath}`
+      : 'The unreadable file was empty and has not been kept.'
+    const message = recovery.outcome === 'restored-from-backup'
+      ? 'Zettlr could not read its settings file and restored the settings from the copy saved when Zettlr last started. Changes made to the settings after that start are lost.'
+      : 'Zettlr could not read its settings file and found no usable copy of it, so it started with the default settings.'
+    this._logger.error(`[Config Provider] config.json could not be read (${recovery.reason}); outcome: ${recovery.outcome}. ${keptAs}`)
+
+    app.whenReady()
+      .then(async () => {
+        await dialog.showMessageBox({
+          type: 'warning',
+          title: 'Settings file recovered',
+          message,
+          detail: `This usually happens when the computer shuts down unexpectedly while Zettlr is saving its settings.\n\nReason: ${recovery.reason}\n\n${keptAs}`
+        })
+      })
+      .catch(err => { this._logger.error(`[Config Provider] Could not show the settings recovery message: ${String(err)}`) })
   }
 
   // Enable global event listening to updates of the config
@@ -259,6 +305,14 @@ export default class ConfigProvider extends ProviderContract {
     * @param  {any}  readConfig  The read config from disk.
     */
   private runMigrations (readConfig: any): void {
+    if (readConfig.editor !== null && typeof readConfig.editor === 'object' && !Array.isArray(readConfig.editor)) {
+      readConfig.editor.autoCloseCharacterPairs = normalizeCharacterPairSettings(
+        readConfig.editor.autoCloseCharacterPairs, readConfig.editor.autoCloseBrackets
+      )
+    }
+    if (readConfig.display?.copyVisibleTextCategories !== undefined) {
+      readConfig.display.copyVisibleTextCategories = normalizeCopyVisibleTextCategories(readConfig.display.copyVisibleTextCategories)
+    }
     // After version 4.0.0, we have split up `openPaths` into separate file and
     // workspaces arrays.
     if (('openPaths' in readConfig)) {
@@ -407,13 +461,49 @@ export default class ConfigProvider extends ProviderContract {
     * @param {string} absolutePath The absolute path of the opened file
     */
   recordOpenedFile (absolutePath: string): void {
-    const validFile = isFile(absolutePath) && hasMdOrCodeExt(absolutePath)
+    const validFile = isFile(absolutePath) && (hasMdOrCodeExt(absolutePath) || hasPDFExt(absolutePath))
 
-    if (!validFile || ignorePath(absolutePath)) {
+    // Zettlr-LYH: files below dot folders such as .claude are opened in tabs
+    // like any other file, so they must enter the history (and thus the Files
+    // tree); only the ignore list (.git, .obsidian, ...) still applies.
+    if (!validFile || ignorePath(absolutePath, false)) {
       return
     }
 
     this.config.app.openFiles = updateOpenHistory(this.config.app.openFiles, absolutePath)
+
+    this.consolidateRootPaths()
+    this._container.set(this.config)
+    this._emitter.emit('update', 'openPaths')
+    broadcastIpcMessage('config-provider', { command: 'update', payload: 'openPaths' })
+  }
+
+  // Zettlr-LYH session tabs in the Files section (R71)
+  /**
+    * Records the files of a restored session in the open history. In contrast
+    * to recordOpenedFile, nothing is promoted: files already contained in the
+    * history keep their position, and missing ones are appended in the given
+    * order. The same filters as in recordOpenedFile apply. Persists and
+    * notifies only if the history actually changed.
+    *
+    * @param {string[]} absolutePaths The absolute paths of the session's files
+    */
+  recordSessionFiles (absolutePaths: string[]): void {
+    const validPaths = absolutePaths.filter(absolutePath => {
+      return isFile(absolutePath) && (hasMdOrCodeExt(absolutePath) || hasPDFExt(absolutePath)) && !ignorePath(absolutePath, false)
+    })
+
+    const currentHistory = this.config.app.openFiles
+    const mergedHistory = appendMissingToOpenHistory(currentHistory, validPaths)
+
+    const unchanged = mergedHistory.length === currentHistory.length &&
+      mergedHistory.every((entry, index) => entry === currentHistory[index])
+
+    if (unchanged) {
+      return
+    }
+
+    this.config.app.openFiles = mergedHistory
 
     this.consolidateRootPaths()
     this._container.set(this.config)
@@ -427,13 +517,13 @@ export default class ConfigProvider extends ProviderContract {
     * @return {Boolean} True, if the path was successfully added, else false.
     */
   addPath (p: string): boolean {
-    const validFile = isFile(p) && hasMdOrCodeExt(p)
+    const validFile = isFile(p) && (hasMdOrCodeExt(p) || hasPDFExt(p))
 
     if (validFile) {
       // Files are maintained as an open history, so delegate to the single
       // entry point for that. NOTE that, in contrast to the workspaces below,
       // a file that is already known is not rejected but simply promoted.
-      if (ignorePath(p)) {
+      if (ignorePath(p, false)) {
         return false
       }
 
@@ -503,24 +593,19 @@ export default class ConfigProvider extends ProviderContract {
     }
 
     if (attr.indexOf('.') > 0) {
-      // A nested argument was requested, so iterate until we find it
-      let nested = attr.split('.')
-      let cfg = this.config
-      for (let arg of nested) {
-        if (arg in cfg) {
-          // arg will be a keyof ConfigOptions at this point
-          cfg = cfg[arg as keyof ConfigOptions] as unknown as any
-        } else {
-          this._logger.warning(`[Config Provider] Someone has requested a non-existent key: ${attr}`)
-          return null // The config option must match exactly
-        }
+      // A nested argument was requested. Follow own properties only, so that
+      // inherited names such as "toString" never count as configuration keys.
+      const result = resolveOwnConfigPath(this.config, attr)
+      if (!result.found) {
+        this._logger.warning(`[Config Provider] Someone has requested a non-existent key: ${attr}`)
+        return null // The config option must match exactly
       }
 
-      return cfg // Now not the requested config option.
+      return result.value
     }
 
-    // Plain attribute requested
-    if (attr in this.config) {
+    // Plain attribute requested (own properties only)
+    if (isOwnConfigKey(this.config, attr)) {
       return this.config[attr as keyof ConfigOptions]
     } else {
       this._logger.warning(`[Config Provider] Someone has requested a non-existent key: ${attr}`)
@@ -543,12 +628,36 @@ export default class ConfigProvider extends ProviderContract {
     * @param  {any}      value       The value of the config variable.
     * @param  {boolean}  skipChecks  For internal use only. Do not use.
     */
-  set (option: string, value: any, skipChecks = false): void {
-    // Don't add non-existent options
-    if (option in this.config && this._validate(option, value)) {
+  set (option: string, value: any, skipChecks = false): boolean {
+    if (option.startsWith('editor.autoCloseCharacterPairs.') && !this._validate(option, value)) {return false}
+    if (option === 'editor.autoCloseCharacterPairs') {
+      if (!this._validate(option, value)) {return false}
+      value = {
+        ...normalizeCharacterPairSettings(this.config.editor.autoCloseCharacterPairs, this.config.editor.autoCloseBrackets),
+        ...value
+      }
+    }
+    if (option === 'editor' && value !== null && typeof value === 'object' && 'autoCloseCharacterPairs' in value) {
+      if (!this._validate(option, value)) {return false}
+      value = {
+        ...value,
+        autoCloseCharacterPairs: {
+          ...normalizeCharacterPairSettings(this.config.editor.autoCloseCharacterPairs, this.config.editor.autoCloseBrackets),
+          ...value.autoCloseCharacterPairs
+        }
+      }
+    }
+    if (option.startsWith('display.copyVisibleTextCategories.') && !this._validate(option, value)) {return false}
+    if (option === 'display.copyVisibleTextCategories') {
+      if (!this._validate(option, value)) {return false}
+      value = normalizeCopyVisibleTextCategories({ ...this.config.display.copyVisibleTextCategories, ...value })
+    }
+    // Don't add non-existent options; inherited names such as "toString" are
+    // not configuration options.
+    if (isOwnConfigKey(this.config, option) && this._validate(option, value)) {
       // Do not set the option if it already has the requested value
       if (this.config[option as keyof ConfigOptions] === value) {
-        return
+        return true
       }
 
       // Set the new value and inform the listeners
@@ -561,29 +670,24 @@ export default class ConfigProvider extends ProviderContract {
         this.checkOptionForGuard(option)
       }
     } else if (option.indexOf('.') > 0) {
-      // A nested argument was requested, so iterate until we find it
-      let nested = option.split('.')
-      // Last one must be set manually, b/c simple attributes aren't pointers
-      let prop = nested.pop()! // We can be sure it's not undefined
-      let cfg = this.config
-      for (let arg of nested) {
-        if (arg in cfg) {
-          cfg = cfg[arg as keyof ConfigOptions] as unknown as any
-        } else {
-          return // The config option must match exactly
-        }
+      // A nested argument was requested. Use own properties only, so that
+      // inherited names such as "toString" can never be overwritten through a
+      // dotted key. The last segment is assigned on its parent object, b/c
+      // simple attributes aren't pointers.
+      const target = findOwnConfigParent(this.config, option)
+      if (target === null) {
+        return false // The config option must match exactly
       }
 
       // Set the nested property
-      if (prop in cfg && this._validate(option, value)) {
+      if (this._validate(option, value)) {
         // Do not set the option if it already has the requested value
-        if (cfg[prop as keyof ConfigOptions] === value) {
-          return
+        if (target.parent[target.key] === value) {
+          return true
         }
 
         // Set the new value and inform the listeners
-        // @ts-expect-error Since we're dynamically assigning a value here
-        cfg[prop as keyof ConfigOptions] = value
+        target.parent[target.key] = value
         this._container.set(this.config)
         this._emitter.emit('update', option)
         broadcastIpcMessage('config-provider', { command: 'update', payload: option })
@@ -596,8 +700,13 @@ export default class ConfigProvider extends ProviderContract {
             this.sortPaths()
           }
         }
+      } else {
+        return false
       }
+    } else {
+      return false
     }
+    return true
   }
 
   /**
@@ -673,10 +782,22 @@ export default class ConfigProvider extends ProviderContract {
    * @return {Boolean}       False, if a given validation failed, otherwise true.
    */
   _validate (key: string, value: any): boolean {
+    if (key === 'editor' && value !== null && typeof value === 'object' && 'autoCloseCharacterPairs' in value) {
+      return Object.prototype.hasOwnProperty.call(value, 'autoCloseCharacterPairs') &&
+        isCharacterPairSettingsUpdate(value.autoCloseCharacterPairs)
+    }
     let rule = this._rules.find(elem => elem.getKey() === key)
     // There is a rule for this key, so validate
     if (rule !== undefined) {
       return rule.validate(value)
+    }
+    // Zettlr-LYH: these options are dictionaries with a fixed set of
+    // categories, and each known category has its own rule. Reject any other
+    // sub-key, so that _validate() itself never accepts an unknown category
+    // or an inherited name such as "toString", whoever the caller is.
+    if (key.startsWith('display.codeEditingExceptions.') || key.startsWith('display.copyVisibleTextCategories.') ||
+      key.startsWith('editor.autoCloseCharacterPairs.')) {
+      return false
     }
     // There are some options for which there is no validation.
     return true

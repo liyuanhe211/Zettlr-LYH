@@ -38,6 +38,7 @@ import { hasMarkdownExt, hasCodeExt } from '@common/util/file-extention-checks'
 import getMarkdownFileParser from './util/file-parser'
 import type ConfigProvider from '@providers/config'
 import { promises as fs, constants as FS_CONSTANTS, type Stats } from 'fs'
+import { writeFileSafely } from '@common/util/write-file-safely'
 import { safeDelete } from './util/safe-delete'
 import { type FilesystemMetadata, getFilesystemMetadata } from './util/get-fs-metadata'
 import { ignorePath } from 'source/common/util/ignore-path'
@@ -56,6 +57,11 @@ export {
   type FilesystemMetadata,
   getFilesystemMetadata
 }
+
+// ZETTLR-LYH SAFE SAVE: writeFileSafely lives in @common/util/write-file-safely
+// so that the persistent data containers (config.json and others) use the
+// same crash-safe write; it is re-exported here for existing importers.
+export { writeFileSafely }
 
 export interface FSALEventPayloadUnlink {
   event: 'unlink'|'unlinkDir'
@@ -529,7 +535,9 @@ export default class FSAL extends ProviderContract {
   public async writeTextFile (filePath: string, contents: string): Promise<void> {
     // In case this file was cached, remove the cached data again.
     await this._cache.del(filePath)
-    await fs.writeFile(filePath, contents, 'utf-8')
+    await writeFileSafely(filePath, Buffer.from(contents, 'utf8'), (message) => {
+      this._logger.warning(message)
+    })
   }
 
   /**
