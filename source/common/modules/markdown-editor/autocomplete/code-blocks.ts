@@ -12,30 +12,70 @@
  * END HEADER
  */
 
-import { type Completion } from '@codemirror/autocomplete'
-import { type EditorView } from '@codemirror/view'
+import { pickedCompletion, type Completion } from '@codemirror/autocomplete'
+import { Prec, type EditorState, type Extension } from '@codemirror/state'
+import { keymap, type EditorView } from '@codemirror/view'
 import { trans } from '@common/i18n-renderer'
 import { type AutocompletePlugin } from '.'
+import { createCodeFenceTransaction, findCodeFenceOpening } from '../util/code-fence'
+import { normalizeCharacterPairSettings } from '../util/character-pair-policy'
+import { configField } from '../util/configuration'
 
 /**
- * This utility function just takes an info-string that should be placed after
- * the initial codeblock delimiters, and inserts that, two linebreaks, and the
- * end of the codeblock, plus placing the cursor in between.
+ * Whether the "Code fences" character pair choice is on. An editor without a
+ * configuration field keeps the original behavior, which is to complete fences.
+ */
+function isFenceCompletionEnabled (state: EditorState): boolean {
+  const configuration = state.field(configField, false)
+  if (configuration === undefined) {
+    return true
+  }
+  return normalizeCharacterPairSettings(configuration.autoCloseCharacterPairs, configuration.autoCloseBrackets).codeFences
+}
+
+/**
+ * Apply an explicitly chosen info string through the same fence pairing rules
+ * as Enter, preserving the delimiter length and any existing closing fence.
+ * When the Code fences choice is off, only the info string is rewritten.
  *
  * @param   {string}      infoString  The infostring to use
  */
 function generate (infoString: string): (view: EditorView, completion: Completion, from: number, to: number) => void {
   return (view, completion, from, to) => {
-    // This apply function basically just makes sure that, after the actual
-    // insertion, we can add a blank line, add the end of the block delimiters,
-    // and position the cursor correctly.
-    const delim = view.state.doc.sliceString(from - 3, from)
-    view.dispatch({
-      changes: [{ from, to, insert: infoString + '\n\n' + delim }],
-      selection: { anchor: from + infoString.length + 1 }
-    })
+    if (view.state.readOnly || view.composing || view.compositionStarted || view.state.selection.ranges.length !== 1 || !view.state.selection.main.empty) {
+      return
+    }
+    const opening = findCodeFenceOpening(view.state, view.state.selection.main.head)
+    if (opening === undefined || to !== opening.lineTo || from < opening.lineFrom + opening.infoFrom) {
+      return
+    }
+    const transaction = createCodeFenceTransaction(opening, infoString, isFenceCompletionEnabled(view.state))
+    view.dispatch(transaction, { annotations: pickedCompletion.of(completion) })
   }
 }
+
+/** Run before generic Enter/acceptCompletion, without choosing a suggested language. */
+export const fenceCompletionExtension: Extension = Prec.highest(keymap.of([
+  {
+    key: 'Enter',
+    run (view) {
+      const { state } = view
+      if (state.readOnly || view.composing || view.compositionStarted || state.selection.ranges.length !== 1 || !state.selection.main.empty) {
+        return false
+      }
+      // With the Code fences choice off, the generic Enter commands take over.
+      if (!isFenceCompletionEnabled(state)) {
+        return false
+      }
+      const opening = findCodeFenceOpening(state, state.selection.main.head)
+      if (opening === undefined) {
+        return false
+      }
+      view.dispatch(createCodeFenceTransaction(opening))
+      return true
+    }
+  }
+]))
 
 function getEntries (): Completion[] {
   return [
@@ -102,23 +142,14 @@ function getEntries (): Completion[] {
 
 export const codeBlocks: AutocompletePlugin = {
   applies (ctx) {
-    const line = ctx.state.doc.lineAt(ctx.pos)
-    const ch = ctx.pos - line.from
-    // We're not at the very start of the document, so let's see what the line
-    // above the position says. TODO: For this we have to check if the previous
-    // line is already part of a codeblock
-    const match = /^\s{0,3}[`~]{3,}\s*{?(.*)/.exec(line.text)
-    if (match !== null && ch === match[0].length) {
-      // To make the regex more robust, there is a capturing group that captures
-      // any characters already typed, and that will be passed on as "query"
-      // below. NOTE: This is mainly due to the dead-letter mechanism on
-      // European keyboards, since usually this keeps letters in a "ghost" state
-      // and if users afterwards press the space, that will count as a keypress
-      // but not as an additional character, preventing the autocomplete to show.
-      return ctx.pos - match[1].length
-    } else {
+    if (ctx.state.selection.ranges.length !== 1 || !ctx.state.selection.main.empty) {
       return false
     }
+    const opening = findCodeFenceOpening(ctx.state, ctx.pos)
+    if (opening === undefined) {
+      return false
+    }
+    return opening.lineFrom + opening.infoFrom + (opening.infoString.startsWith('{') ? 1 : 0)
   },
   entries (ctx, query) {
     query = query.toLowerCase()
