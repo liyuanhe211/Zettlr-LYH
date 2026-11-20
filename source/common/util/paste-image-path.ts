@@ -8,21 +8,23 @@
  *
  * Description:     Pure helper functions for saving images pasted from the
  *                  clipboard without asking the user: they derive the image's
- *                  file name, build the "_Images" folder next to the document,
+ *                  file name, build the "_Zettlr_Img" folder next to the document,
  *                  produce numbered alternatives on name conflicts, and build
- *                  the relative Markdown image link that is inserted into the
- *                  document. This module is shared by main and renderer, so it
- *                  must not import Node.js modules.
+ *                  the Markdown image link that is inserted into the document:
+ *                  a relative link normally, an absolute one in a draft of the
+ *                  Unsaved Files folder (R126). This module is shared by main
+ *                  and renderer, so it must not import Node.js modules.
  *
  * END HEADER
  */
 
 import sanitize from 'sanitize-filename'
+import { pathBasename, pathDirname } from './renderer-path-polyfill'
 
 /**
  * The name of the folder (next to the document) into which pasted images go.
  */
-export const PASTED_IMAGE_DIRECTORY_NAME = '_Images'
+export const PASTED_IMAGE_DIRECTORY_NAME = '_Zettlr_Img'
 
 /**
  * The generic file name Chromium assigns to clipboard images (e.g. screenshots).
@@ -176,7 +178,7 @@ export function buildCandidateFileName (fileName: string, attempt: number): stri
 }
 
 /**
- * Returns the absolute path of the "_Images" folder next to the document,
+ * Returns the absolute path of the "_Zettlr_Img" folder next to the document,
  * using the separator style of the provided document directory.
  *
  * @param   {string}  documentDirectory  The absolute directory of the document
@@ -192,7 +194,7 @@ export function buildPastedImageDirectory (documentDirectory: string): string {
 
 /**
  * Returns the path of a pasted image relative to its document, always with
- * forward slashes, e.g. "_Images/image.png".
+ * forward slashes, e.g. "_Zettlr_Img/image.png".
  *
  * @param   {string}  fileName  The image's file name
  *
@@ -203,22 +205,200 @@ export function buildPastedImageRelativePath (fileName: string): string {
 }
 
 /**
- * Builds the Markdown image tag for a relative image path. Backslashes become
+ * Turns a file path into a Markdown link destination. Backslashes become
  * forward slashes; spaces and parentheses are percent-encoded, since the
  * Markdown parser accepts neither spaces nor unbalanced parentheses in link
  * destinations, and a literal "%" is encoded first, since the destination is
  * percent-decoded when the image is loaded.
  *
- * @param   {string}  relativePath  The relative path of the image
+ * @param   {string}  filePath  The path of the image, relative or absolute
  *
- * @return  {string}                The image tag, e.g. "![](_Images/a%20b.png)"
+ * @return  {string}            The link destination
  */
-export function buildImageMarkdownLink (relativePath: string): string {
-  const destination = relativePath
+function encodeImageDestination (filePath: string): string {
+  return filePath
     .replace(/\\/g, '/')
     .replace(/%/g, '%25')
+    .replace(/#/g, '%23')
+    .replace(/\?/g, '%3F')
     .replace(/ /g, '%20')
     .replace(/\(/g, '%28')
     .replace(/\)/g, '%29')
-  return `![](${destination})`
+}
+
+/**
+ * Builds the Markdown image tag for a relative image path. See
+ * encodeImageDestination for how the path is written.
+ *
+ * @param   {string}  relativeImagePath  The relative path of the image
+ *
+ * @return  {string}                     The image tag, e.g. "![](_Zettlr_Img/a%20b.png)"
+ */
+export function buildImageMarkdownLink (relativeImagePath: string): string {
+  return `![](${encodeImageDestination(relativeImagePath)})`
+}
+
+/**
+ * Where an image is inserted and what it is inserted into (R126).
+ */
+export interface InsertedImageLocation {
+  /**
+   * The absolute path of the document into which the image is inserted.
+   */
+  documentPath: string
+  /**
+   * The absolute path of the image file.
+   */
+  imagePath: string
+  /**
+   * True if the document is a draft of the Unsaved Files folder. A draft is
+   * moved when the user saves it, so a relative link in it would break; images
+   * pasted or dropped into a draft therefore receive an absolute link.
+   */
+  isDraft: boolean
+}
+
+/**
+ * Returns the link destination for an absolute image path: backslashes become
+ * forward slashes ("C:\X\a b.png" becomes "C:/X/a%20b.png", the network path
+ * "\\server\share\x.png" becomes "//server/share/x.png"), without a file://
+ * prefix, and spaces, parentheses and percent signs are encoded exactly as
+ * buildImageMarkdownLink does.
+ *
+ * @param   {string}  absolutePath  The absolute path of the image
+ *
+ * @return  {string}                The link destination
+ */
+export function buildAbsoluteImageDestination (absolutePath: string): string {
+  return encodeImageDestination(absolutePath)
+}
+
+/**
+ * Returns the link destination to insert for an image that exists on disk: in a
+ * draft the absolute destination (see buildAbsoluteImageDestination), otherwise
+ * an encoded path relative to the document folder. Different Windows drives
+ * or network shares require an absolute path. Native file paths are literal,
+ * so a percent sign is encoded once rather than interpreted as an escape.
+ *
+ * @param   {InsertedImageLocation}  input  The document, the image and whether
+ *                                          the document is a draft
+ *
+ * @return  {string}                        The link destination
+ */
+export function chooseInsertedImageDestination (input: InsertedImageLocation): string {
+  if (input.isDraft) {
+    return buildAbsoluteImageDestination(input.imagePath)
+  }
+  const directory = pathDirname(input.documentPath).replace(/\\/g, '/')
+  const imagePath = input.imagePath.replace(/\\/g, '/')
+  const volumePattern = /^(?:[a-z]:|\/\/[^/]+\/[^/]+)(?=\/|$)/i
+  const documentVolume = volumePattern.exec(directory)?.[0].toLowerCase() ?? ''
+  const imageVolume = volumePattern.exec(imagePath)?.[0].toLowerCase() ?? ''
+  if (documentVolume !== imageVolume) {
+    return encodeImageDestination(imagePath)
+  }
+
+  const directorySegments = directory.split('/').filter(segment => segment !== '')
+  const imageSegments = imagePath.split('/').filter(segment => segment !== '')
+  const comparable = (segment: string): string => documentVolume === '' ? segment : segment.toLowerCase()
+  let sharedSegments = 0
+  while (sharedSegments < directorySegments.length && sharedSegments < imageSegments.length &&
+    comparable(directorySegments[sharedSegments]) === comparable(imageSegments[sharedSegments])) {
+    sharedSegments++
+  }
+  const relative = [
+    ...Array<string>(directorySegments.length - sharedSegments).fill('..'),
+    ...imageSegments.slice(sharedSegments)
+  ].join('/')
+  return encodeImageDestination(relative)
+}
+
+/**
+ * Builds the Markdown image tag for an image that the main process has saved
+ * from the clipboard into the "_Zettlr_Img" folder next to the document. In a draft
+ * the link is the absolute path of the saved file; otherwise it is the relative
+ * link "_Zettlr_Img/<file name>", as before.
+ *
+ * @param   {InsertedImageLocation}  input  The document, the saved image and
+ *                                          whether the document is a draft
+ *
+ * @return  {string}                        The image tag without alternative
+ *                                          text, e.g. "![](_Zettlr_Img/a%20b.png)"
+ */
+export function buildSavedClipboardImageLink (input: InsertedImageLocation): string {
+  if (input.isDraft) {
+    return `![](${chooseInsertedImageDestination(input)})`
+  }
+  // Main always saves into the "_Zettlr_Img" folder next to the document, so the
+  // relative path consists of that folder and the file name main has chosen.
+  return buildImageMarkdownLink(buildPastedImageRelativePath(pathBasename(input.imagePath)))
+}
+
+/**
+ * Builds the Markdown image tag for an image that already exists on disk (a
+ * pasted or dropped image file), using the destination that
+ * chooseInsertedImageDestination returns.
+ *
+ * @param   {string}                 altText  The alternative text of the image
+ * @param   {InsertedImageLocation}  input    The document, the image file and
+ *                                            whether the document is a draft
+ *
+ * @return  {string}                          The image tag
+ */
+export function buildExistingImageLink (altText: string, input: InsertedImageLocation): string {
+  const escapedAltText = altText.replace(/\\/g, '\\\\').replace(/\[/g, '\\[').replace(/\]/g, '\\]')
+  return `![${escapedAltText}](${chooseInsertedImageDestination(input)})`
+}
+
+/**
+ * Reads explicit file references from text/uri-list. A browser image URL is
+ * not a local file reference, and ordinary text/Markdown is never passed here.
+ * Decode file URLs once; paths from getPathForFile are already literal paths
+ * and must never be percent-decoded.
+ */
+export function parseClipboardFileUrls (uriList: string): string[] {
+  const paths: string[] = []
+  for (const line of uriList.split(/\r?\n/)) {
+    const value = line.trim()
+    if (!/^file:\/\//i.test(value)) {
+      continue
+    }
+    try {
+      const location = new URL(value)
+      const pathname = decodeURIComponent(location.pathname)
+      const filePath = location.hostname !== '' && location.hostname !== 'localhost'
+        ? `//${location.hostname}${pathname}`
+        : pathname.replace(/^\/([A-Za-z]:\/)/, '$1')
+      const hasControlCharacters = Array.from(filePath).some(character => character.charCodeAt(0) < 32)
+      if (filePath !== '' && !hasControlCharacters) {
+        paths.push(filePath)
+      }
+    } catch {
+      // Malformed URLs provide no usable file identity.
+    }
+  }
+  return paths
+}
+
+/**
+ * Folder names that mark a temporary location. Screenshot tools put the
+ * screenshot on the clipboard as image data together with a reference to a
+ * file they wrote into such a folder, e.g. the Windows Snipping Tool writes
+ * "AppData/Local/Packages/MicrosoftWindows.Client.Core_.../TempState/ScreenClip/{GUID}.png".
+ */
+const TEMPORARY_FOLDER_NAMES = new Set([ 'temp', 'tmp', 'tempstate', 'inetcache', 'temporary internet files' ])
+
+/**
+ * Checks whether a pasted image file lies in a temporary location, i.e. any
+ * folder on its path is a temporary folder. Such a file is not a lasting
+ * original: it is saved into the "_Zettlr_Img" folder like image data instead
+ * of being linked (R163).
+ *
+ * @param   {string}   imagePath  The absolute path of the image file
+ *
+ * @return  {boolean}             True if the file lies in a temporary folder
+ */
+export function isTemporaryImageLocation (imagePath: string): boolean {
+  const folders = imagePath.split(/[\\/]+/).slice(0, -1)
+  return folders.some(folder => TEMPORARY_FOLDER_NAMES.has(folder.toLowerCase()))
 }

@@ -22,6 +22,8 @@ import { isAbsolutePath, resolvePath } from './renderer-path-polyfill'
 const protocolRE = getProtocolRE()
 const linkRE = getLinkRE()
 const emailRe = /^[a-z0-9-.]+@[a-z0-9-.]+\.[a-z0-9-.]{2,}$/i
+// A Windows absolute path starting with a drive letter, e.g. "C:/Users" or "C:\Users"
+const driveLetterPathRE = /^[a-z]:[/\\]/i
 // A Windows shortcut file ("figure.png.lnk"). It can be the address of an image,
 // which the main process resolves to the file the shortcut points to, so it is
 // a local file even though ".lnk" is no known file extension and the name looks
@@ -88,21 +90,30 @@ export default function makeValidUri (uri: string, base: string = ''): string {
   let isFile
   let protocol = ''
 
-  try {
-    const parsed = new URL(uri)
-    if (parsed.protocol === 'file:') {
-      isFile = true
-      protocol = 'file'
-      // "file" links could be relative, and we need to tend to that possibility
-      // below, so even if this is a proper URL, we have to let the rest of the
-      // functionality take over.
-      throw new Error('Look at my smart programming lol')
+  // Zettlr-LYH R126: A Windows path with a drive letter ("C:/Users/a.png") is
+  // no URL, but the URL constructor accepts it and, following the WHATWG
+  // specification, reads the drive letter as the scheme "c". It would thus
+  // return "c:/Users/a.png", which no image or file loader understands. So such
+  // a path must not take the shortcut below, but go through the absolute-path
+  // handling, which yields the same safe-file address as for a relative path.
+  // Real protocols always have a scheme of at least two characters.
+  if (!driveLetterPathRE.test(uri)) {
+    try {
+      const parsed = new URL(uri)
+      if (parsed.protocol === 'file:') {
+        isFile = true
+        protocol = 'file'
+        // "file" links could be relative, and we need to tend to that possibility
+        // below, so even if this is a proper URL, we have to let the rest of the
+        // functionality take over.
+        throw new Error('Look at my smart programming lol')
+      }
+      return parsed.toString()
+    } catch (err) {
+      // We can trust the URL constructor to throw an error if it is not something
+      // that a web browser can *immediately* open. So if new URL() doesn't throw,
+      // we have a proper URL and can save us these shenanigans.
     }
-    return parsed.toString()
-  } catch (err) {
-    // We can trust the URL constructor to throw an error if it is not something
-    // that a web browser can *immediately* open. So if new URL() doesn't throw,
-    // we have a proper URL and can save us these shenanigans.
   }
 
   // First, remove a potential protocol and save it for later use
