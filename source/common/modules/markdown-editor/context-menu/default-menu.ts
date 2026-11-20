@@ -23,6 +23,7 @@ import { cut, copyAsPlain, copyAsHTML, paste, pasteAsPlain } from '../util/copy-
 import { getTransformSubmenu } from './transform-items'
 import { getPandocAttributeSection, type PandocAttributeRange } from './pandoc-attribute-menu'
 import { extractLTSpellcheckSuggestionsFrom, isLanguageToolMisspelling } from '../linters/language-tool'
+import { appendExtraMenuItems } from './link-image-menu'
 
 const ipcRenderer = window.ipc
 const suggestionCache = new Map<string, string[]>()
@@ -81,11 +82,14 @@ async function fetchSuggestions (term: string): Promise<string[]> {
  * Shows a default context menu for the given node at the given coordinates in
  * the given view.
  *
- * @param   {EditorView}                view    The view
- * @param   {SyntaxNode}                node    The node
- * @param   {{ x: number, y: number }}  coords  The screen coordinates
+ * @param   {EditorView}                view        The view
+ * @param   {SyntaxNode}                node        The node
+ * @param   {{ x: number, y: number }}  coords      The screen coordinates
+ * @param   {PandocAttributeRange}      pandocRange The Pandoc attribute targets
+ * @param   {AnyMenuItem[]}             extraItems  Items appended at the end
+ *                                                  after a separator
  */
-export async function defaultMenu (view: EditorView, node: SyntaxNode, coords: { x: number, y: number }, pandocRange?: PandocAttributeRange): Promise<void> {
+export async function defaultMenu (view: EditorView, node: SyntaxNode, coords: { x: number, y: number }, pandocRange?: PandocAttributeRange, extraItems: AnyMenuItem[] = []): Promise<void> {
   // In this function, we're doing a lot of iffs to check if there is a
   // spellcheck underneath the cursor and, if there is, add suggestions (if
   // there are) to the context menu.
@@ -291,5 +295,5 @@ export async function defaultMenu (view: EditorView, node: SyntaxNode, coords: {
     tpl.push(...getPandocAttributeSection(view, pandocRange, coords))
   }
 
-  showPopupMenu(coords, tpl)
+  showPopupMenu(coords, appendExtraMenuItems(tpl, extraItems))
 }
