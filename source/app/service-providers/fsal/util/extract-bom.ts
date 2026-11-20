@@ -15,11 +15,21 @@
 /**
  * A utility function that can extract a BOM from a text.
  *
+ * A file that has been decoded as text (as the FSAL does) holds its UTF-8 BOM
+ * as the single character U+FEFF, so that character at the start of the text
+ * is reported as the BOM. The remaining checks compare the values of the first
+ * characters with the byte values of the other encodings' BOMs, as they appear
+ * in a text that was read byte by byte.
+ *
  * @param   {string}  text  The text to be tested for the presence of a BOM
  *
  * @return  {string}        The BOM, or an empty string if none was found
  */
 export default function extractBOM (text: string): string {
+  if (text.startsWith('﻿')) {
+    return '﻿' // A UTF-8 BOM (EF BB BF) in a text that has been decoded
+  }
+
   if (text.length < 2) {
     return '' // A BOM is at least two bytes long
   }
