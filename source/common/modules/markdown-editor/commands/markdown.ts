@@ -16,6 +16,7 @@ import { type ChangeSpec, EditorSelection } from '@codemirror/state'
 import { type EditorView } from '@codemirror/view'
 import { configField, configUpdateEffect } from '../util/configuration'
 import { indentUnit, language, syntaxTree } from '@codemirror/language'
+import { toggleInlineStyle } from '../util/inline-style-rebuild'
 import { formatPandocAttributes, type ParsedPandocAttributes } from 'source/common/pandoc-util/parse-pandoc-attributes'
 import { indentMore } from '@codemirror/commands'
 import { nodeInSelection } from '../util/node-in-selection'
@@ -183,12 +184,20 @@ function applyBlockMarkup (target: EditorView, formatting: string): void {
  * Helper function that surrounds the selection ranges in the target view with
  * the provided inline markup
  *
- * @param   {EditorView}  target  The target view
- * @param   {string}      start   The start markup
- * @param   {string}      end     The end markup
+ * @param   {EditorView}  target    The target view
+ * @param   {string}      start     The start markup
+ * @param   {string}      end       The end markup
+ * @param   {string}      nodeName  Optional syntax node of this markup kind
+ *                                  (`StrongEmphasis`, `Emphasis`): nonempty
+ *                                  selections then toggle by the parsed
+ *                                  objects, see toggleInlineStyle
  */
-function applyInlineMarkup (target: EditorView, start: string, end: string): void {
+function applyInlineMarkup (target: EditorView, start: string, end: string, nodeName?: string): void {
+  const syntaxNodeName = start === end ? nodeName : undefined
   const transaction = target.state.changeByRange(range => {
+    if (syntaxNodeName !== undefined && !range.empty) {
+      return toggleInlineStyle(target.state, range, start, syntaxNodeName)
+    }
     const contents = target.state.sliceDoc(range.from, range.to)
     const before = target.state.sliceDoc(range.from - start.length, range.from)
     const after = target.state.sliceDoc(range.to, range.to + end.length)
@@ -316,7 +325,7 @@ export function applyBold (target: EditorView): boolean {
   }
 
   const markup = target.state.field(configField, false)?.boldFormatting ?? '**'
-  applyInlineMarkup(target, markup, markup)
+  applyInlineMarkup(target, markup, markup, 'StrongEmphasis')
   return true
 }
 
@@ -333,7 +342,7 @@ export function applyItalic (target: EditorView): boolean {
   }
 
   const markup = target.state.field(configField, false)?.italicFormatting ?? '*'
-  applyInlineMarkup(target, markup, markup)
+  applyInlineMarkup(target, markup, markup, 'Emphasis')
   return true
 }
 
