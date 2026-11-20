@@ -72,9 +72,31 @@
   }
 
   /* Footnotes */
+  /* The size follows the editor's base font size (set as a custom property on
+  the editor wrapper), not `em`: footnote references can sit inside a heading
+  line, whose own font-size is a multiple such as 2em, and an `em` value would
+  be multiplied by that again. The fallback keeps the original look wherever
+  the custom property is not in scope. */
   .footnote, .footnote-ref-label {
     vertical-align: super;
-    font-size: 0.8rem;
+    font-size: calc(var(--editor-base-font-size, 18px) * 0.8);
+  }
+
+  /* Zettlr-LYH: superscripts, subscripts and footnote markers are shifted by
+  relative positioning on the baseline with a line height of zero, so that
+  they never make their line taller than the other lines of the paragraph. */
+  sup, sub, .footnote, .footnote-ref-label {
+    line-height: 0;
+    position: relative;
+    vertical-align: baseline;
+  }
+
+  sup, .footnote, .footnote-ref-label {
+    top: -0.5em;
+  }
+
+  sub {
+    bottom: -0.25em;
   }
 
   /* NOTE: Disabling because pre-rendered elements will not inherit this font size (see #5999) */
@@ -124,6 +146,16 @@
     vertical-align: middle;
   }
 
+  /* Zettlr-LYH (R116): Task checkboxes, and their enlarged clickable area
+  (from the list marker to just right of the checkbox, see render-tasks.ts),
+  show a hand pointer. */
+  input[type="checkbox"].cm-task-checkbox { cursor: pointer; }
+
+  .cm-scroller.cm-task-hit-area-hover .cm-content,
+  .cm-scroller.cm-task-hit-area-hover .cm-content * {
+    cursor: pointer;
+  }
+
   /* ZETTLR-SPECIFIC CLASSES */
   /* ======================================================================== */
 
@@ -143,8 +175,14 @@
     padding: 0 4px;
 
 
+    /* These tags replace the heading characters and therefore always sit on a
+    heading line, whose font-size is a multiple such as 2em. The size is thus
+    tied to the editor's base font size (a custom property on the editor
+    wrapper) rather than to `em`, so that it scales with the editor font size
+    alone and is not enlarged by the heading as well. The fallback equals the
+    previous fixed size of 20px. */
     span {
-      font-size: 20px;
+      font-size: calc(var(--editor-base-font-size, 18px) * 1.111);
       font-weight: normal;
     }
   }
@@ -199,15 +237,6 @@
     font-size: 13px;
   }
 
-  .cm-formatting-bar {
-    background-color: #f5f5f5;
-    border-color: #f5f5f5;
-
-    .cm-tooltip-arrow::before, .cm-tooltip-arrow::after {
-      border-top-color: #f5f5f5;
-      border-bottom-color: #f5f5f5;
-    }
-  }
   /* END */
 
   /* The underlying gfm mode is funny. For top level task items, it applies the
@@ -263,15 +292,6 @@
     font-size: 13px;
   }
 
-  .cm-formatting-bar {
-    background-color: #f5f5f5;
-    border-color: #f5f5f5;
-
-    .cm-tooltip-arrow::before, .cm-tooltip-arrow::after {
-      border-top-color: #f5f5f5;
-      border-bottom-color: #f5f5f5;
-    }
-  }
   /* END */
 }
 
@@ -291,19 +311,6 @@ body.dark {
     border-color: #646464;
   }
 
-  .cm-formatting-bar {
-    background-color: #333333;
-    border-color: #333333;
-
-    button.formatting-toolbar-button {
-      color: #c8c8c8;
-    }
-
-    .cm-tooltip-arrow::before, .cm-tooltip-arrow::after {
-      border-top-color: #333333;
-      border-bottom-color: #333333;
-    }
-  }
   /* END */
 
   .tippy-content .editor-fn-textarea {

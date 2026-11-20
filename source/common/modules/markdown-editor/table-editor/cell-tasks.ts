@@ -18,6 +18,7 @@
  */
 
 import type { EditorView } from '@codemirror/view'
+import { closestTableTaskHit } from '../util/task-hit-area'
 
 /**
  * A task marker inside the Markdown source of a single table cell.
@@ -288,6 +289,107 @@ function createCheckbox (checked: boolean, index: number, view: CellTaskView): H
 }
 
 /**
+ * The main editor view of every content wrapper that has the enlarged
+ * checkbox hit area attached (R116). Refreshed on every rendering, so that the
+ * listeners, which are attached only once, always use the current view.
+ */
+const hitAreaViews = new WeakMap<HTMLElement, CellTaskView>()
+
+/**
+ * Whether the given event target is one of the rendered task checkboxes.
+ *
+ * @param   {EventTarget|null}  target  The event target
+ *
+ * @return  {boolean}                   Whether it is a task checkbox
+ */
+function isCellTaskCheckbox (target: EventTarget|null): target is HTMLInputElement {
+  const element = target as Element|null
+  return element !== null && element.nodeName === 'INPUT' &&
+    element.classList.contains(CELL_TASK_CHECKBOX_CLASS)
+}
+
+/**
+ * Zettlr-LYH (R116): Finds the task checkbox of a rendered (not currently
+ * edited) table cell whose enlarged clickable area, the checkbox extended by
+ * `TABLE_TASK_HIT_AREA_MARGIN` pixels on every side, contains the given
+ * pointer position.
+ *
+ * @param   {HTMLElement}              contentWrapper  The cell's content wrapper
+ * @param   {number}                   x               The pointer's client x
+ * @param   {number}                   y               The pointer's client y
+ *
+ * @return  {HTMLInputElement|null}                    The checkbox, or null
+ */
+export function findCellTaskHit (contentWrapper: HTMLElement, x: number, y: number): HTMLInputElement|null {
+  if (contentWrapper.classList.contains('editing')) {
+    return null
+  }
+  // Only direct children: an open cell editor renders checkboxes of its own.
+  const checkboxes = [...contentWrapper.children].filter(isCellTaskCheckbox)
+  return closestTableTaskHit(checkboxes, checkbox => checkbox.getBoundingClientRect(), x, y)
+}
+
+/**
+ * Zettlr-LYH (R116): Lets a press and release within the enlarged clickable
+ * area of a cell's task checkbox toggle the task like a click on the checkbox
+ * itself, without opening the cell's editor, and shows a hand pointer within
+ * that area. The listeners are attached only once per content wrapper.
+ *
+ * @param   {HTMLElement}   contentWrapper  The cell's content wrapper
+ * @param   {CellTaskView}  view            The main editor view
+ */
+function attachCellTaskHitArea (contentWrapper: HTMLElement, view: CellTaskView): void {
+  const alreadyAttached = hitAreaViews.has(contentWrapper)
+  hitAreaViews.set(contentWrapper, view)
+  if (alreadyAttached) {
+    return
+  }
+
+  let pressedCheckbox: HTMLInputElement|null = null
+
+  contentWrapper.addEventListener('mousedown', (event) => {
+    pressedCheckbox = null
+    if (event.button !== 0 || isCellTaskCheckbox(event.target)) {
+      return
+    }
+    const checkbox = findCellTaskHit(contentWrapper, event.clientX, event.clientY)
+    if (checkbox === null) {
+      return
+    }
+    // Like the checkbox itself: keep the cell from entering editing mode, and
+    // prevent any focus or selection change.
+    event.preventDefault()
+    event.stopPropagation()
+    pressedCheckbox = checkbox
+  })
+
+  contentWrapper.addEventListener('click', (event) => {
+    const pressed = pressedCheckbox
+    pressedCheckbox = null
+    if (pressed === null || event.target === pressed) {
+      return
+    }
+    const checkbox = findCellTaskHit(contentWrapper, event.clientX, event.clientY)
+    const currentView = hitAreaViews.get(contentWrapper)
+    if (checkbox !== pressed || currentView === undefined) {
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    toggleCellTaskFromCheckbox(checkbox, currentView)
+  })
+
+  contentWrapper.addEventListener('mousemove', (event) => {
+    const hovered = findCellTaskHit(contentWrapper, event.clientX, event.clientY) !== null
+    contentWrapper.style.cursor = hovered ? 'pointer' : ''
+  })
+
+  contentWrapper.addEventListener('mouseleave', () => {
+    contentWrapper.style.cursor = ''
+  })
+}
+
+/**
  * Replaces the task prefixes in a rendered table cell with checkboxes. Must be
  * called right after the cell's content wrapper has been filled with the HTML
  * rendered from `cellSource`. The DOM is only modified if the number of task
@@ -342,6 +444,8 @@ export function renderCellTaskCheckboxes (
       plan.partialText.node.data = plan.partialText.node.data.slice(plan.partialText.length)
     }
   }
+
+  attachCellTaskHitArea(contentWrapper, view)
 
   return plans.length
 }
