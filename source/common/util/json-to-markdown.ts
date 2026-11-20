@@ -68,6 +68,24 @@ export interface JSONMarkdownConversion {
    * All parse errors encountered during conversion
    */
   errors: JSONParseError[]
+  /**
+   * Where each non-empty line of a JSON Lines file ended up in the Markdown,
+   * in file order, so that a range of the raw text can be shown in the viewer.
+   * Empty for a JSON document, whose outline does not follow the file's lines.
+   */
+  records: JSONLinesRecordRange[]
+}
+
+export interface JSONLinesRecordRange {
+  /**
+   * The one-indexed line of the source file
+   */
+  line: number
+  /**
+   * Start and end offset of the record's blocks in the Markdown
+   */
+  from: number
+  to: number
 }
 
 const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/
@@ -247,6 +265,8 @@ export function jsonValueToMarkdown (value: unknown): string {
 export function convertJSONLinesToMarkdown (content: string): JSONMarkdownConversion {
   const blocks: string[] = []
   const errors: JSONParseError[] = []
+  // The source line and the index of the first block of every record
+  const recordStarts: Array<{ line: number, block: number }> = []
   let recordCount = 0
 
   stripByteOrderMark(content).split(/\r?\n/).forEach((line, index) => {
@@ -255,6 +275,7 @@ export function convertJSONLinesToMarkdown (content: string): JSONMarkdownConver
     }
 
     const lineNumber = index + 1
+    recordStarts.push({ line: lineNumber, block: blocks.length })
     try {
       const value: unknown = JSON.parse(line)
       recordCount++
@@ -269,7 +290,40 @@ export function convertJSONLinesToMarkdown (content: string): JSONMarkdownConver
     }
   })
 
-  return { markdown: joinBlocks(blocks), format: 'jsonl', recordCount, errors }
+  // joinBlocks separates the blocks with a blank line
+  const blockOffsets: number[] = []
+  let offset = 0
+  for (const block of blocks) {
+    blockOffsets.push(offset)
+    offset += block.length + 2
+  }
+  const records = recordStarts.map((start, index) => {
+    const next = recordStarts[index + 1]
+    const to = next === undefined ? offset - 2 : blockOffsets[next.block] - 2
+    return { line: start.line, from: blockOffsets[start.block], to }
+  })
+
+  return { markdown: joinBlocks(blocks), format: 'jsonl', recordCount, errors, records }
+}
+
+/**
+ * Finds the part of the converted Markdown that shows the given lines of a
+ * JSON Lines file: from the first record on these lines to the end of the
+ * last one. Empty lines have no record and are skipped.
+ *
+ * @param   {JSONLinesRecordRange[]}  records    The records of the conversion
+ * @param   {number}                  firstLine  First source line (one-indexed)
+ * @param   {number}                  lastLine   Last source line (one-indexed)
+ *
+ * @return  {{ from: number, to: number }|undefined}  The Markdown range, or
+ *          undefined when no record lies on these lines
+ */
+export function jsonLinesMarkdownRange (records: JSONLinesRecordRange[], firstLine: number, lastLine: number): { from: number, to: number }|undefined {
+  const covered = records.filter(record => record.line >= firstLine && record.line <= lastLine)
+  if (covered.length === 0) {
+    return undefined
+  }
+  return { from: covered[0].from, to: covered[covered.length - 1].to }
 }
 
 /**
@@ -285,12 +339,12 @@ export function convertJSONLinesToMarkdown (content: string): JSONMarkdownConver
 export function convertJSONToMarkdown (content: string): JSONMarkdownConversion {
   const text = stripByteOrderMark(content)
   if (text.trim() === '') {
-    return { markdown: joinBlocks([]), format: 'json', recordCount: 0, errors: [] }
+    return { markdown: joinBlocks([]), format: 'json', recordCount: 0, errors: [], records: [] }
   }
 
   try {
     const value: unknown = JSON.parse(text)
-    return { markdown: jsonValueToMarkdown(value), format: 'json', recordCount: 1, errors: [] }
+    return { markdown: jsonValueToMarkdown(value), format: 'json', recordCount: 1, errors: [], records: [] }
   } catch (error) {
     const asJSONLines = convertJSONLinesToMarkdown(text)
     if (asJSONLines.recordCount > 1 && asJSONLines.errors.length === 0) {
@@ -310,7 +364,7 @@ export function convertJSONToMarkdown (content: string): JSONMarkdownConversion 
         ? 'The file is not valid JSON. Switch to "Raw Text" mode to view or edit it.'
         : `The file is not valid JSON; the error is near line ${line}. Switch to "Raw Text" mode to view or edit it.`
     ]
-    return { markdown: joinBlocks(blocks), format: 'json', recordCount: 0, errors: [{ line, message }] }
+    return { markdown: joinBlocks(blocks), format: 'json', recordCount: 0, errors: [{ line, message }], records: [] }
   }
 }
 
