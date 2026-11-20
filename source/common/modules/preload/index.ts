@@ -16,6 +16,7 @@
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { CiteprocProviderIPCAPI } from 'source/app/service-providers/citeproc'
+import { isolateListener } from './isolate-listener'
 
 // PREPARATION: Since we have multiple editor panes and all of them need to
 // listen to a few events, we need to ramp up some of the channels' max
@@ -41,11 +42,24 @@ contextBridge.exposeInMainWorld('ipc', {
     // NOTE: We're returning a stopListening() callback here since the function
     // will be cloned across the context bridge, so not the same object, hence
     // it cannot be removed otherwise.
-    const callback = (event: any, ...args: any[]): void => {
-      // Omit the event when calling the listener
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-      listener(undefined, ...args)
-    }
+    // Zettlr-LYH data loss prevention (R173, specification C21 section 2):
+    // the listener runs isolated. Node's EventEmitter stops calling the
+    // remaining listeners of a channel once one of them throws; a single
+    // broken listener must not silence the ones registered after it.
+    const callback = isolateListener(
+      channel,
+      (event: any, ...args: any[]): unknown => {
+        // Omit the event when calling the listener. The return value is handed
+        // on so that a rejected promise of an async listener is caught, too.
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+        return (listener as (...args: any[]) => unknown)(undefined, ...args)
+      },
+      (report) => {
+        console.error(`[IPC listener on ${channel}] A listener failed: ${report.message}`, report.stack)
+        // The report enters the runtime error log (requirement R99)
+        ipcRenderer.send('renderer-runtime-error', report)
+      }
+    )
     ipcRenderer.on(channel, callback)
 
     return () => ipcRenderer.off(channel, callback)

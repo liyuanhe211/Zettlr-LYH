@@ -18,6 +18,7 @@
 import registerThemes from './register-themes'
 import registerDefaultContextMenu from './register-default-context'
 import loadIcons from './load-icons'
+import registerRuntimeErrorReporting from './report-runtime-errors'
 import { loadData } from '@common/i18n-renderer'
 
 /**
@@ -26,6 +27,9 @@ import { loadData } from '@common/i18n-renderer'
  * bar (on Windows and Linux, if native is off)
  */
 export default async function windowRegister (): Promise<void> {
+  // Report uncaught errors to the main process first, so that errors during
+  // the remaining setup are reported, too
+  registerRuntimeErrorReporting()
   // Immediately load the translations
   await loadData()
   // Load the clarity icons

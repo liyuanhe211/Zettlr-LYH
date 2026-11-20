@@ -18,6 +18,7 @@ import { app, ipcMain } from 'electron'
 // @ts-expect-error Somehow TypeScript is very unhappy about this import.
 import chalk from 'chalk'
 import ProviderContract from '../provider-contract'
+import { RuntimeErrorLog, type RuntimeErrorLogInput } from './runtime-error-log'
 
 /**
  * How many logfiles should the app keep at most?
@@ -59,6 +60,7 @@ export default class LogProvider extends ProviderContract {
   private readonly _log: LogMessage[]
   private _entryPointer: number
   private _fileLock: boolean
+  private readonly _runtimeErrorLog: RuntimeErrorLog
 
   constructor () {
     super()
@@ -66,6 +68,11 @@ export default class LogProvider extends ProviderContract {
     this._log = []
     this._entryPointer = 0 // Set the log entry file pointer to zero
     this._fileLock = false // True while data is being appended to the log
+    // The dedicated runtime error log lives outside logs/ so that
+    // _cleanLogs() never removes it. Its own problems go to the general log.
+    this._runtimeErrorLog = new RuntimeErrorLog(app.getPath('userData'), {
+      warn: (message: string) => { this.warning(`[Runtime Error Log] ${message}`) }
+    })
 
     // Ensure message handling
     ipcMain.handle('log-provider', (event, payload) => {
@@ -217,6 +224,34 @@ export default class LogProvider extends ProviderContract {
     this._fileLock = true
     await fs.writeFile(logfile, stringsToWrite.join('\n') + '\n', { flag: 'a' })
     this._fileLock = false
+  }
+
+  /**
+   * Returns the full path of the log file that today's entries go into.
+   */
+  public getCurrentLogFilePath (): string {
+    return path.join(this._logPath, this._getLogfileName())
+  }
+
+  /**
+   * Writes one runtime error to the dedicated runtime error log only; the
+   * caller writes the general log line itself. Never throws.
+   *
+   * @param  {RuntimeErrorLogInput}  input  The error as reported
+   */
+  public recordRuntimeError (input: RuntimeErrorLogInput): void {
+    try {
+      this._runtimeErrorLog.record(input)
+    } catch {
+      // RuntimeErrorLog.record never throws; this guards the promise anyway
+    }
+  }
+
+  /**
+   * Returns the full path of the dedicated runtime error log file.
+   */
+  public getRuntimeErrorLogPath (): string {
+    return this._runtimeErrorLog.getFilePath()
   }
 
   /**

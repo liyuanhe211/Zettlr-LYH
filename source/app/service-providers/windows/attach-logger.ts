@@ -46,4 +46,29 @@ export default function attachLogger (logger: LogProvider, win: BrowserWindow, i
         break
     }
   })
+
+  // A blank (white) window leaves no trace in the renderer's own console, so
+  // record the events that can cause one from the main process' side.
+  win.webContents.on('render-process-gone', (_event, details) => {
+    logger.error(`[Window Manager] [${id}] Renderer process gone: ${details.reason} (exit code ${details.exitCode})`)
+    // Requirement R99: also keep it in the runtime error log
+    const title = !win.isDestroyed() ? win.getTitle() : ''
+    logger.recordRuntimeError({
+      process: 'renderer',
+      window: title !== '' ? title : 'Unknown window',
+      kind: 'render-process-gone',
+      message: `${details.reason} (exit code ${details.exitCode})`
+    })
+  })
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (isMainFrame) {
+      logger.error(`[Window Manager] [${id}] Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`)
+    }
+  })
+  win.on('unresponsive', () => {
+    logger.warning(`[Window Manager] [${id}] Window became unresponsive`)
+  })
+  win.on('responsive', () => {
+    logger.info(`[Window Manager] [${id}] Window is responsive again`)
+  })
 }
