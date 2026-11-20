@@ -89,6 +89,7 @@ import { footnoteComposite, footnoteParser, footnoteRefParser } from './footnote
 import { frontmatterParser, yamlCodeParse } from './frontmatter-parser'
 import { inlineMathParser, blockMathParser } from './math-parser'
 import { pandocLinkParser } from './pandoc-link-parser'
+import { reviseCommentParser } from './revise-comment-parser'
 import { gridTableParser, pipeTableParser } from './pandoc-table-parser'
 import { type ZknLinkParserConfig, zknLinkParser } from './zkn-link-parser'
 import { pandocAttributesParser } from './pandoc-attributes-parser'
@@ -96,6 +97,7 @@ import { highlightParser } from './highlight-parser'
 import { zknTagParser } from './zkn-tag-parser'
 import { pandocDivComposite, pandocDivParser, pandocSpanParser } from './pandoc-div-span-parser'
 import { admonitionComposite, admonitionParser } from './admonition-parser'
+import { cjkEmphasisParser, cjkStrikethroughParser } from './cjk-emphasis-parser'
 
 const codeLanguages: Array<{ mode: Language|LanguageDescription|null, selectors: string[] }> = [
   { mode: markdownLanguage, selectors: [ 'markdown', 'md' ] },
@@ -248,8 +250,13 @@ export default function markdownParser (config?: MarkdownParserConfig): Language
         zknLinkParser(config?.zknLinkParserConfig),
         zknTagParser,
         pandocLinkParser,
+        // Keep Revise Comments "[text{comment}]" out of reference links
+        reviseCommentParser,
         pandocAttributesParser,
         highlightParser,
+        // Let emphasis and strikethrough close/open next to CJK punctuation
+        cjkEmphasisParser,
+        cjkStrikethroughParser,
       ],
       // We have to notify the markdown parser about the additional Node Types
       // that the YAML block parser utilizes
