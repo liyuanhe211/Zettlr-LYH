@@ -383,6 +383,10 @@ export interface HtmlBlockScan {
    */
   tags: Array<{ from: number, to: number, tag: ParsedHtmlTag }>
   /**
+   * Line breaks rendered without replacing the editable block text
+   */
+  voidTags: Array<{ from: number, to: number, tag: VoidHtmlTag }>
+  /**
    * The character entities, with offsets relative to the block's text
    */
   entities: Array<{ from: number, to: number }>
@@ -393,21 +397,28 @@ export interface HtmlBlockScan {
  * Returns undefined if the block contains any element that is not
  * whitelisted (e.g. `<table>`, `<iframe>`, `<script>`), since such a block
  * must be left as it is rather than rendered in part.
+ * Line breaks are supported in place; images and links retain their
+ * whole-block rendering path.
  *
  * @param   {string}                    text  The block's text
  *
  * @return  {HtmlBlockScan|undefined}         The findings
  */
 export function scanHtmlBlock (text: string): HtmlBlockScan|undefined {
-  const scan: HtmlBlockScan = { tags: [], entities: [] }
+  const scan: HtmlBlockScan = { tags: [], voidTags: [], entities: [] }
   const withoutComments = text.replace(/<!--[\s\S]*?-->/g, comment => ' '.repeat(comment.length))
 
-  for (const match of withoutComments.matchAll(/<\/?[a-z][a-z0-9]*(?:\s[^<>]*)?>/gi)) {
+  for (const match of withoutComments.matchAll(/<\/?[a-z][a-z0-9]*(?:\s[^<>]*)?\/?>/gi)) {
     const tag = parseHtmlTag(match[0])
     if (tag === undefined) {
-      return undefined
+      const voidTag = parseVoidHtmlTag(match[0])
+      if (voidTag?.name !== 'br') {
+        return undefined
+      }
+      scan.voidTags.push({ from: match.index, to: match.index + match[0].length, tag: voidTag })
+    } else {
+      scan.tags.push({ from: match.index, to: match.index + match[0].length, tag })
     }
-    scan.tags.push({ from: match.index, to: match.index + match[0].length, tag })
   }
 
   for (const match of withoutComments.matchAll(HTML_ENTITY_PATTERN)) {

@@ -19,15 +19,17 @@
  *                  stand for. The text itself stays editable text. Inside
  *                  paragraphs, it also renders links (`<a href="...">`, opened
  *                  with Ctrl-click, Cmd-click on macOS), line breaks (`<br>`)
- *                  and images (`<img src="...">`).
+ *                  and images (`<img src="...">`). A span with a background
+ *                  color (the formatting toolbar writes them) is padded so that
+ *                  the color has no stripes between lines.
  *
  * END HEADER
  */
 
 import { syntaxTree } from '@codemirror/language'
-import type { EditorState, Range, RangeSet } from '@codemirror/state'
+import type { EditorState, Range } from '@codemirror/state'
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate, WidgetType } from '@codemirror/view'
-import { rangeInSelection } from '../util/range-in-selection'
+import { shouldRevealSource, sourceRevealChanged } from '../util/reveal-selection'
 import { configField } from '../util/configuration'
 import {
   parseHtmlTag,
@@ -43,6 +45,7 @@ import {
 } from '../util/html-span-tags'
 import clickAndSelect from './click-and-select'
 import { isLinkModifierPressed, openHtmlLink, resolveHtmlImageSource } from './render-html-block'
+import { overlapsXmlTagControls } from '../util/xml-tags'
 
 const hiddenDeco = Decoration.replace({})
 
@@ -97,12 +100,13 @@ const lineBreakDeco = Decoration.replace({ widget: new LineBreakWidget() })
  * source, a Ctrl-click (Cmd-click on macOS) inside a rendered link opens it.
  */
 class InlineImageWidget extends WidgetType {
-  constructor (readonly source: string, readonly attributes: Record<string, string>) {
+  constructor (readonly source: string, readonly attributes: Record<string, string>, readonly sourceRange: { from: number, to: number }) {
     super()
   }
 
   eq (other: InlineImageWidget): boolean {
-    return other.source === this.source && JSON.stringify(other.attributes) === JSON.stringify(this.attributes)
+    return other.source === this.source && JSON.stringify(other.attributes) === JSON.stringify(this.attributes) &&
+      other.sourceRange.from === this.sourceRange.from && other.sourceRange.to === this.sourceRange.to
   }
 
   toDOM (view: EditorView): HTMLElement {
@@ -137,7 +141,7 @@ class InlineImageWidget extends WidgetType {
         openHtmlLink(link.dataset.href, view)
         return
       }
-      clickAndSelect(view)(event)
+      clickAndSelect(view, 'html', this.sourceRange)(event)
     })
 
     image.src = this.source
@@ -195,7 +199,23 @@ function linkMark (attributes: Record<string, string>): Decoration|undefined {
   })
 }
 
-function createHtmlDecorations (view: EditorView): RangeSet<Decoration> {
+/**
+ * The decorations of the HTML renderer. The marks that wrap the content of
+ * inline elements are kept apart, because they are provided as outer
+ * decorations: a regular mark is split into several DOM elements wherever a
+ * lower-precedence decoration (inline code, a search match, ...) starts or
+ * ends inside it, and each piece of an element such as
+ * `<span style="display: inline-block; margin-left: 1.5em">` would then
+ * repeat the box with its margin, so that the text shifts sideways.
+ */
+interface HtmlDecorations {
+  /** Hidden tags, widgets and line attributes of block elements */
+  decorations: DecorationSet
+  /** Marks that wrap the content of inline elements and links */
+  outer: DecorationSet
+}
+
+function createHtmlDecorations (view: EditorView): HtmlDecorations {
   const state = view.state
   const includeAdjacent = state.field(configField, false)?.previewModeShowSyntaxWhenCursorIsAdjacent ?? true
   const documentPath = state.field(configField, false)?.metadata.path ?? ''
@@ -234,6 +254,9 @@ function createHtmlDecorations (view: EditorView): RangeSet<Decoration> {
             for (const tag of scan.tags) {
               occurrences.push({ from: node.from + tag.from, to: node.from + tag.to, tag: tag.tag, blockId: node.from })
             }
+            for (const tag of scan.voidTags) {
+              voidTags.push({ from: node.from + tag.from, to: node.from + tag.to, tag: tag.tag })
+            }
             for (const entity of scan.entities) {
               entities.push({ from: node.from + entity.from, to: node.from + entity.to })
             }
@@ -245,10 +268,12 @@ function createHtmlDecorations (view: EditorView): RangeSet<Decoration> {
   }
 
   const ranges: Array<Range<Decoration>> = []
+  const outerRanges: Array<Range<Decoration>> = []
 
   for (const { open, close } of pairHtmlTags(occurrences)) {
+    const xmlControls = overlapsXmlTagControls(state, open.from, open.to) || overlapsXmlTagControls(state, close.from, close.to)
     // Show the raw syntax while the selection touches the element
-    if (rangeInSelection(state.selection, open.from, close.to, includeAdjacent)) {
+    if (shouldRevealSource(state, 'html', open.from, close.to, includeAdjacent)) {
       continue
     }
 
@@ -268,12 +293,14 @@ function createHtmlDecorations (view: EditorView): RangeSet<Decoration> {
       contentMark = Decoration.mark({ tagName: open.tag.name, attributes: open.tag.attributes })
     }
 
-    ranges.push(hiddenDeco.range(open.from, open.to))
-    ranges.push(hiddenDeco.range(close.from, close.to))
+    if (!xmlControls) {
+      ranges.push(hiddenDeco.range(open.from, open.to))
+      ranges.push(hiddenDeco.range(close.from, close.to))
+    }
 
     if (contentMark !== undefined) {
       if (open.to < close.from) {
-        ranges.push(contentMark.range(open.to, close.from))
+        outerRanges.push(contentMark.range(open.to, close.from))
       }
     } else {
       addBlockLineDecorations(state, open.to, close.from, blockLineAttributes(open.tag), ranges)
@@ -281,7 +308,7 @@ function createHtmlDecorations (view: EditorView): RangeSet<Decoration> {
   }
 
   for (const { from, to, tag } of voidTags) {
-    if (rangeInSelection(state.selection, from, to, includeAdjacent)) {
+    if (shouldRevealSource(state, 'html', from, to, includeAdjacent)) {
       continue
     }
     if (state.sliceDoc(from, to).includes('\n')) {
@@ -299,12 +326,12 @@ function createHtmlDecorations (view: EditorView): RangeSet<Decoration> {
       if (source === '') {
         continue
       }
-      ranges.push(Decoration.replace({ widget: new InlineImageWidget(source, decodedAttributes) }).range(from, to))
+      ranges.push(Decoration.replace({ widget: new InlineImageWidget(source, decodedAttributes, { from, to }) }).range(from, to))
     }
   }
 
   for (const { from, to } of entities) {
-    if (rangeInSelection(state.selection, from, to, includeAdjacent)) {
+    if (shouldRevealSource(state, 'html', from, to, includeAdjacent)) {
       continue
     }
     const character = decodeEntity(state.sliceDoc(from, to))
@@ -313,7 +340,7 @@ function createHtmlDecorations (view: EditorView): RangeSet<Decoration> {
     }
   }
 
-  return Decoration.set(ranges, true)
+  return { decorations: Decoration.set(ranges, true), outer: Decoration.set(outerRanges, true) }
 }
 
 /**
@@ -335,18 +362,20 @@ function addBlockLineDecorations (
 
 const htmlSpanPlugin = ViewPlugin.fromClass(class {
   decorations: DecorationSet
+  outer: DecorationSet
 
   constructor (view: EditorView) {
-    this.decorations = createHtmlDecorations(view)
+    ({ decorations: this.decorations, outer: this.outer } = createHtmlDecorations(view))
   }
 
   update (update: ViewUpdate): void {
-    if (update.docChanged || update.viewportChanged || update.selectionSet) {
-      this.decorations = createHtmlDecorations(update.view)
+    if (update.docChanged || update.viewportChanged || update.selectionSet || sourceRevealChanged(update)) {
+      ({ decorations: this.decorations, outer: this.outer } = createHtmlDecorations(update.view))
     }
   }
 }, {
   decorations: v => v.decorations,
+  provide: plugin => EditorView.outerDecorations.of(view => view.plugin(plugin)?.outer ?? Decoration.none),
   eventHandlers: {
     // Ctrl-click (Cmd-click on macOS) on a rendered link opens it. A plain
     // click is not intercepted, so the cursor lands in the text as usual and
@@ -366,8 +395,88 @@ const htmlSpanPlugin = ViewPlugin.fromClass(class {
   }
 })
 
+/**
+ * The name of the CSS custom property that holds the vertical padding of a span
+ * with a background color (see `backgroundPaddingPlugin`).
+ */
+const BACKGROUND_PADDING_PROPERTY = '--zettlr-html-span-background-padding'
+
+/**
+ * Zettlr-LYH (R131): The background of an inline element fills its content
+ * area, which is shorter than the line when the line height is larger than the
+ * height of the font (the difference is split above and below the text).
+ * Across several lines, a background color would therefore show a stripe of
+ * the page between the lines. Padding the span above and below by half of that
+ * difference makes the colored area exactly as tall as the line, so that the
+ * areas of consecutive lines touch. Inline padding does not change the height
+ * of the line.
+ *
+ * Neither number is fixed: the line height comes from the theme
+ * (`--zettlr-editor-line-height`), the content area from the font. This plugin
+ * measures both and keeps the padding, in `em` of the span's own font size, in
+ * a custom property of the editor. Until a measurement exists (and wherever
+ * layout is unavailable), the stylesheet's fallback applies.
+ */
+const backgroundPaddingPlugin = ViewPlugin.fromClass(class {
+  private readonly probe: HTMLElement
+  private readonly probeText: HTMLElement
+  private applied: string|null = null
+
+  constructor (private readonly view: EditorView) {
+    // A hidden line of text in the scroller, which gives it the font of the
+    // text. It sits outside of the content, which the editor keeps in sync
+    // with the document.
+    this.probe = document.createElement('div')
+    this.probe.setAttribute('aria-hidden', 'true')
+    this.probe.style.cssText = 'position: absolute; top: 0; left: 0; visibility: hidden; pointer-events: none; white-space: pre;'
+    this.probeText = document.createElement('span')
+    this.probeText.textContent = 'Hg'
+    this.probe.appendChild(this.probeText)
+    view.scrollDOM.appendChild(this.probe)
+    this.scheduleMeasurement()
+  }
+
+  update (): void {
+    // The font or the line height may have changed with the theme or the
+    // zoom; a measurement is cheap and only writes if the result differs
+    this.scheduleMeasurement()
+  }
+
+  destroy (): void {
+    this.probe.remove()
+    this.view.dom.style.removeProperty(BACKGROUND_PADDING_PROPERTY)
+  }
+
+  private scheduleMeasurement (): void {
+    this.view.requestMeasure<string|null>({
+      key: this,
+      read: (view) => {
+        const fontSize = parseFloat(window.getComputedStyle(this.probe).fontSize)
+        const contentHeight = this.probeText.getBoundingClientRect().height
+        const lineHeight = view.defaultLineHeight
+        if (!(fontSize > 0) || !(contentHeight > 0) || !(lineHeight > 0)) {
+          return null
+        }
+        return `${(Math.max(0, lineHeight - contentHeight) / 2 / fontSize).toFixed(4)}em`
+      },
+      write: (padding, view) => {
+        if (padding === this.applied) {
+          return
+        }
+        this.applied = padding
+        if (padding === null) {
+          view.dom.style.removeProperty(BACKGROUND_PADDING_PROPERTY)
+        } else {
+          view.dom.style.setProperty(BACKGROUND_PADDING_PROPERTY, padding)
+        }
+      }
+    })
+  }
+})
+
 export const renderHtmlSpans = [
   htmlSpanPlugin,
+  backgroundPaddingPlugin,
   EditorView.baseTheme({
     '.cm-html-link': {
       color: 'var(--zettlr-editor-primary-color)',
@@ -381,6 +490,18 @@ export const renderHtmlSpans = [
     // Keep the aspect ratio when a width is given and the image is shrunk
     '.cm-html-inline-image[width]': {
       height: 'auto'
+    },
+    // Zettlr-LYH (R131): A background color spans the full height of the line
+    // (see backgroundPaddingPlugin). `clone` repeats the padding on every line
+    // fragment of a span that wraps. The fallback is half of the difference
+    // between the default line height of 1.4 and a typical font height of
+    // 1.2. A span with its own `display` (an inline block) is left alone,
+    // since padding would make its line taller.
+    '.cm-line span[style*="background-color"]:not([style*="display"])': {
+      paddingTop: `var(${BACKGROUND_PADDING_PROPERTY}, 0.1em)`,
+      paddingBottom: `var(${BACKGROUND_PADDING_PROPERTY}, 0.1em)`,
+      boxDecorationBreak: 'clone',
+      WebkitBoxDecorationBreak: 'clone'
     }
   })
 ]

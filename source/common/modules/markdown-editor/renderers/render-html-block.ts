@@ -26,6 +26,7 @@ import { type SyntaxNodeRef } from '@lezer/common'
 import { EditorView, WidgetType } from '@codemirror/view'
 import { type EditorState } from '@codemirror/state'
 import clickAndSelect from './click-and-select'
+import { sourceEditingAllowed } from '../util/reveal-selection'
 import { resolveImageUrl } from './render-images'
 import { sanitizeHTML } from '@common/util/sanitize-html'
 import { isAbsolutePath, pathDirname, resolvePath } from '@common/util/renderer-path-polyfill'
@@ -33,6 +34,7 @@ import { configField } from '../util/configuration'
 import openMarkdownLink from '../util/open-markdown-link'
 import { classifyHtmlBlock } from '../util/html-block-scan'
 import { normalizeLinkHref } from '../util/html-span-tags'
+import { overlapsXmlTagControls } from '../util/xml-tags'
 
 /**
  * Returns true if the modifier that opens links is pressed: Cmd on macOS,
@@ -95,7 +97,7 @@ export function openHtmlLink (href: string, view: EditorView): void {
  */
 export function resolveHtmlImageSource (source: string, documentPath: string): string {
   try {
-    return resolveImageUrl(documentPath, source.trim())
+    return resolveImageUrl(documentPath, source.trim()) ?? ''
   } catch (error) {
     return '' // A source that cannot be turned into a URL is not loaded
   }
@@ -118,13 +120,17 @@ const RENDERED_BLOCKS = new WeakMap<HTMLElement, { source: string, documentPath:
  */
 function renderBlockContents (container: HTMLElement, source: string, documentPath: string): void {
   const template = document.createElement('template')
-  template.innerHTML = sanitizeHTML(source)
+  template.innerHTML = sanitizeHTML(source, { keepWindowsImagePaths: true })
 
   for (const image of Array.from(template.content.querySelectorAll('img'))) {
     image.draggable = false
     const imageSource = image.getAttribute('src')
     if (imageSource !== null && imageSource.trim() !== '') {
-      image.setAttribute('src', resolveHtmlImageSource(imageSource, documentPath))
+      const resolvedSource = resolveHtmlImageSource(imageSource, documentPath)
+      // A source that cannot be resolved keeps its original address
+      if (resolvedSource !== '') {
+        image.setAttribute('src', resolvedSource)
+      }
     }
   }
 
@@ -164,13 +170,17 @@ function handleBlockClick (event: MouseEvent, container: HTMLElement, view: Edit
     return
   }
 
+  if (!sourceEditingAllowed(view.state, 'html')) {
+    return
+  }
+
   // Determine the block's range before the selection changes, since the
   // widget is removed from the DOM as soon as the selection enters the block.
   const rendered = RENDERED_BLOCKS.get(container)
   const from = view.posAtDOM(container)
   const to = Math.min(from + (rendered?.source.length ?? 0), view.state.doc.length)
 
-  clickAndSelect(view)(event)
+  clickAndSelect(view, 'html', { from, to })(event)
 
   // If clickAndSelect could not determine a selection that reveals the
   // source (e.g., the clicked element has no box, or both corners map onto
@@ -222,6 +232,9 @@ function shouldHandleNode (node: SyntaxNodeRef): boolean {
 }
 
 function createWidget (state: EditorState, node: SyntaxNodeRef): HtmlBlockWidget|undefined {
+  if (overlapsXmlTagControls(state, node.from, node.to)) {
+    return undefined
+  }
   const source = state.sliceDoc(node.from, node.to)
   if (classifyHtmlBlock(source) !== 'widget') {
     return undefined
@@ -231,7 +244,7 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): HtmlBlockWidget
 }
 
 export const renderHtmlBlocks = [
-  renderBlockWidgets(shouldHandleNode, createWidget),
+  renderBlockWidgets(shouldHandleNode, createWidget, 'html'),
   EditorView.baseTheme({
     '.html-block-preview': {
       display: 'block',
