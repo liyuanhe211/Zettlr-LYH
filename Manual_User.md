@@ -2222,10 +2222,6 @@ The same exported file works in both computer and phone browsers. It adapts to t
 - A table, a code block, a raw HTML block, or a displayed formula that is too wide for the screen scrolls sideways inside its own frame, while the page as a whole is never wider than the screen. On a touchscreen, scrolling such a frame to its left or right end does not trigger the browser's own back gesture.
 - In a window wider than 700 pixels nothing changes: the file still uses the font size it was exported with, justified text, table cells of at least 96 pixels, and 50 pixels of padding on each side. A tablet held in landscape is usually wider than 700 pixels and therefore looks the same as on a computer.
 
-![The same exported HTML file side by side in a narrow phone window and in a wide computer window, showing the smaller font, left-aligned paragraph, and narrower table cells on the phone](Manual_Images/export-html-phone-and-desktop.png)
-
-Left: the exported file in a phone-sized window, with the font capped at 18 pixels, the paragraph left-aligned, and a three-column table fitting on the screen. Right: the same file in a computer window, with the exported font size, justified text, and wider table cells.
-
 ### Images in the HTML file
 
 Local images (files stored on your computer) are embedded into the HTML file, so it can display them without the original image files. Images with a web address are left as links and loaded from the web when the file is opened.
