@@ -107,6 +107,10 @@ export const useWindowStateStore = defineStore('window-state', () => {
   const distractionFreeMode = ref<undefined|string>(undefined)
   const activeDocumentInfo = ref<undefined|DocumentInfo>(undefined)
   const tableOfContents = ref<ToCEntry[]|undefined>(undefined)
+  // Zettlr-LYH (R112): the line at one third of the visible height of the
+  // active Markdown editor, with the pane and file it belongs to. The sidebar
+  // table of contents highlights the heading of this line.
+  const readingLine = ref<{ leafId: string, filePath: string, line: number }|undefined>(undefined)
   const snippets = ref<Array<{ name: string, content: string }>>([])
   const writingTargets = ref<WritingTarget[]>([])
   // Markdown files for which the pandoc PPTX preview pane is currently open
@@ -116,6 +120,17 @@ export const useWindowStateStore = defineStore('window-state', () => {
   // checkable Attributes button toggles this; the last focused Markdown editor
   // renders the panel while it is open.
   const pandocAttributesPanelOpen = ref(false)
+
+  // Whether the JEV Search panel (R53) is open. The toolbar's checkable JEV
+  // Search button toggles this; App.vue shows the panel to the right of the
+  // editor area while it is open.
+  const jevSearchPanelOpen = ref(false)
+
+  // Zettlr-LYH (R81): the margin that the Markdown editors of this window show
+  // while the toolbar's Margin control is being dragged, for the single-pane
+  // (split false) or the split layout. Null outside a drag; never persisted,
+  // since only the end of a drag writes the configuration.
+  const editorMarginPreview = ref<{ split: boolean, value: number }|null>(null)
 
   function togglePptxPreview (filePath: string): void {
     if (pptxPreviewPaths.value.has(filePath)) {
@@ -173,6 +188,7 @@ export const useWindowStateStore = defineStore('window-state', () => {
     distractionFreeMode,
     activeDocumentInfo,
     tableOfContents,
+    readingLine,
     searchResults,
     addSearchResult,
     maxSearchResultWeight,
@@ -181,6 +197,8 @@ export const useWindowStateStore = defineStore('window-state', () => {
     isFullscreen,
     pptxPreviewPaths,
     togglePptxPreview,
-    pandocAttributesPanelOpen
+    pandocAttributesPanelOpen,
+    jevSearchPanelOpen,
+    editorMarginPreview
   }
 })

@@ -14,11 +14,12 @@
 
 import { defineStore } from 'pinia'
 import { DP_EVENTS, type BranchNodeJSON, type LeafNodeJSON, type OpenDocument } from 'source/types/common/documents'
-import { ref, type Ref } from 'vue'
+import { getCurrentScope, onScopeDispose, ref, type Ref } from 'vue'
 import type { DocumentManagerIPCAPI, DocumentsUpdateContext } from '@providers/documents'
 import { useWindowStateStore } from 'source/pinia'
 import { useWorkspaceStore } from 'source/pinia'
 import { pathDirname } from 'source/common/util/renderer-path-polyfill'
+import { captureWindowEditorReadingStates, copyEditorPaneReadingStates, forgetEditorPaneReadingStates, migrateEditorPaneReadingState } from 'source/win-main/util/editor-pane-reading-state'
 
 const ipcRenderer = window.ipc
 type DocumentTree = BranchNodeJSON|LeafNodeJSON
@@ -206,7 +207,11 @@ export const useDocumentTreeStore = defineStore('document-tree', () => {
     .catch(err => console.error(err))
 
   // ... and we listen to subsequent changes.
-  ipcRenderer.on('documents-update', (evt, payload: { event: DP_EVENTS, context: DocumentsUpdateContext }) => {
+  // Zettlr-LYH data loss prevention (R173, specification C21 section 2): the
+  // listener is removed when this store instance is disposed of. It is not
+  // removed when the module is hot-replaced: Pinia keeps the existing store
+  // instance in that case, and that instance still needs its listener.
+  const stopDocumentsUpdateListener = ipcRenderer.on('documents-update', (evt, payload: { event: DP_EVENTS, context: DocumentsUpdateContext }) => {
     const { event, context } = payload
     // A file has been saved or modified
     if (event === DP_EVENTS.CHANGE_FILE_STATUS && context.status === 'modification') {
@@ -217,6 +222,26 @@ export const useDocumentTreeStore = defineStore('document-tree', () => {
       // We only tend to events that pertain this window
       if (context.windowId !== windowId) {
         return // None of our business
+      }
+
+      // Complete the re-key before CLOSE/OPEN can asynchronously replace the
+      // editor. These existing events will retrieve the updated tab tree.
+      if (event === DP_EVENTS.FILE_PATH_CHANGED) {
+        if (context.leafId !== undefined && context.oldPath !== undefined && context.newPath !== undefined) {
+          migrateEditorPaneReadingState(context.windowId, context.leafId, context.oldPath, context.newPath)
+        }
+        return
+      }
+
+      // Capture before any asynchronous tree retrieval can trigger a pane
+      // replacement. Seed new panes before their first component is mounted.
+      if (event === DP_EVENTS.NEW_LEAF || event === DP_EVENTS.LEAF_CLOSED) {
+        captureWindowEditorReadingStates(context.windowId)
+        if (event === DP_EVENTS.NEW_LEAF && context.originLeaf !== undefined && context.newLeaf !== undefined) {
+          copyEditorPaneReadingStates(context.windowId, context.originLeaf, context.newLeaf)
+        } else if (event === DP_EVENTS.LEAF_CLOSED && context.leafId !== undefined) {
+          forgetEditorPaneReadingStates(context.windowId, context.leafId)
+        }
       }
 
       // Something in the document status has changed, here we simply pull in
@@ -267,6 +292,11 @@ export const useDocumentTreeStore = defineStore('document-tree', () => {
         .catch(err => console.error(err))
     }
   })
+  // Pinia runs the setup of a store inside an effect scope and stops that
+  // scope when the store is disposed of.
+  if (getCurrentScope() !== undefined) {
+    onScopeDispose(stopDocumentsUpdateListener)
+  }
 
   ipcRenderer.on('shortcut', (event, command) => {
     if (command === 'toggle-distraction-free') {
