@@ -135,79 +135,90 @@ export function getAppearanceFields (config: ConfigOptions): PreferencesFieldset
         {
           type: 'form-text',
           display: 'sub-heading',
-          contents: trans('Left section')
+          contents: trans('Show buttons')
         },
         {
-          type: 'checkbox',
-          label: trans('Display "Open settings" button'),
-          model: 'displayToolbarButtons.showOpenPreferencesButton'
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display "New file" button'),
-          model: 'displayToolbarButtons.showNewFileButton'
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display "Previous file" button'),
-          model: 'displayToolbarButtons.showPreviousFileButton'
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display "Next file" button'),
-          model: 'displayToolbarButtons.showNextFileButton'
-        },
-        { type: 'separator' },
-        {
-          type: 'form-text',
-          display: 'sub-heading',
-          contents: trans('Center section')
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display "Insert comment" button'),
-          model: 'displayToolbarButtons.showMarkdownCommentButton'
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display "Insert link" button'),
-          model: 'displayToolbarButtons.showMarkdownLinkButton'
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display "Insert image" button'),
-          model: 'displayToolbarButtons.showMarkdownImageButton'
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display "Insert task list" button'),
-          model: 'displayToolbarButtons.showMarkdownMakeTaskListButton'
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display "Insert table" button'),
-          model: 'displayToolbarButtons.showInsertTableButton'
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display "Insert footnote" button'),
-          model: 'displayToolbarButtons.showInsertFootnoteButton'
+          type: 'style-group',
+          style: 'columns',
+          label: trans('Left section'),
+          fields: [
+            {
+              type: 'checkbox',
+              label: trans('Open settings'),
+              model: 'displayToolbarButtons.showOpenPreferencesButton'
+            },
+            {
+              type: 'checkbox',
+              label: trans('New file'),
+              model: 'displayToolbarButtons.showNewFileButton'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Previous file'),
+              model: 'displayToolbarButtons.showPreviousFileButton'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Next file'),
+              model: 'displayToolbarButtons.showNextFileButton'
+            }
+          ]
         },
         { type: 'separator' },
         {
-          type: 'form-text',
-          display: 'sub-heading',
-          contents: trans('Right section')
+          type: 'style-group',
+          style: 'columns',
+          label: trans('Center section'),
+          fields: [
+            {
+              type: 'checkbox',
+              label: trans('Insert comment'),
+              model: 'displayToolbarButtons.showMarkdownCommentButton'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Insert link'),
+              model: 'displayToolbarButtons.showMarkdownLinkButton'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Insert image'),
+              model: 'displayToolbarButtons.showMarkdownImageButton'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Insert task list'),
+              model: 'displayToolbarButtons.showMarkdownMakeTaskListButton'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Insert table'),
+              model: 'displayToolbarButtons.showInsertTableButton'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Insert footnote'),
+              model: 'displayToolbarButtons.showInsertFootnoteButton'
+            }
+          ]
         },
+        { type: 'separator' },
         {
-          type: 'checkbox',
-          label: trans('Display word/character counter'),
-          model: 'displayToolbarButtons.showDocumentInfoText'
-        },
-        {
-          type: 'checkbox',
-          label: trans('Display Pomodoro timer'),
-          model: 'displayToolbarButtons.showPomodoroButton'
+          type: 'style-group',
+          style: 'columns',
+          label: trans('Right section'),
+          fields: [
+            {
+              type: 'checkbox',
+              label: trans('Word/character counter'),
+              model: 'displayToolbarButtons.showDocumentInfoText'
+            },
+            {
+              type: 'checkbox',
+              label: trans('Pomodoro timer'),
+              model: 'displayToolbarButtons.showPomodoroButton'
+            }
+          ]
         }
       ]
     },

@@ -307,6 +307,21 @@ export function getAdvancedFields (config: ConfigOptions): PreferencesFieldset[]
       ]
     },
     {
+      title: trans('JEV Search'),
+      infoString: trans('The JEV Search sidebar asks the TypeSafe Jev model which parts of the active document match a search description.'),
+      group: PreferencesGroups.Advanced,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'text',
+          label: trans('TypeSafe API key'),
+          model: 'jevSearch.apiKey',
+          placeholder: 'API key',
+          info: trans('If empty, the TYPESAFE_API_KEY environment variable is used. The key is stored in plain text in the Zettlr configuration file.')
+        }
+      ]
+    },
+    {
       title: trans('Watchdog polling'),
       infoString: trans('In rare instances, Zettlr may be unable to check for changes to your files. In that case, you can try activating watchdog polling. Do not use this option unless necessary: Polling is very slow and resource-heavy.'),
       group: PreferencesGroups.Advanced,

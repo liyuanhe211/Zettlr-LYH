@@ -16,6 +16,10 @@ import { trans } from '@common/i18n-renderer'
 import { type PreferencesFieldset } from '../App.vue'
 import { PreferencesGroups } from './_preferences-groups'
 import type { ConfigOptions } from 'source/app/service-providers/config/get-config-template'
+import { codeEditingCategoryLabels } from '@common/modules/markdown-editor/util/code-editing-policy'
+import { copyVisibleTextCategoryLabels } from '@common/modules/markdown-editor/util/visible-copy-policy'
+import { characterPairLabels, normalizeCharacterPairSettings } from '@common/modules/markdown-editor/util/character-pair-policy'
+import { useConfigStore } from 'source/pinia/config'
 
 export function getEditorFields (config: ConfigOptions): PreferencesFieldset[] {
   return [
@@ -149,6 +153,80 @@ export function getEditorFields (config: ConfigOptions): PreferencesFieldset[] {
       ]
     },
     {
+      title: 'Auto Show Code',
+      infoString: 'Control whether clicking a rendered element reveals its Markdown source. Raw mode continues to show the entire source.',
+      group: PreferencesGroups.Editor,
+      fields: [
+        {
+          type: 'checkbox',
+          label: 'Auto Show Code',
+          info: 'Also controls the Auto Show Code button in the main toolbar.',
+          model: 'display.editCodeWhenClicked'
+        },
+        { type: 'separator' },
+        {
+          type: 'form-text',
+          display: 'plain',
+          contents: 'When the Auto Show Code button is off, reveal source on cursor entry for the following types:'
+        },
+        {
+          type: 'style-group',
+          style: 'columns',
+          fields: Object.entries(codeEditingCategoryLabels).map(([ category, label ]) => ({
+            type: 'checkbox' as const,
+            label,
+            model: `display.codeEditingExceptions.${category}`
+          }))
+        }
+      ]
+    },
+    {
+      // Zettlr-LYH (R84, spec C10): revision mode
+      title: 'Track changes',
+      infoString: 'Record insertions and deletions as tracked changes with your author name, and choose whether they are shown.',
+      group: PreferencesGroups.Editor,
+      fields: [
+        {
+          type: 'checkbox',
+          label: 'Track changes',
+          info: 'Also controls the Track Changes button in the main toolbar.',
+          model: 'editor.trackChanges'
+        },
+        {
+          type: 'checkbox',
+          label: 'Show revisions',
+          info: 'When off, the editor shows the text as if all changes were accepted. Also controls the Show Revisions button in the main toolbar.',
+          model: 'display.showRevisions'
+        },
+        {
+          type: 'text',
+          label: 'Revision author',
+          placeholder: 'Your name',
+          info: 'Recorded with every tracked change. If empty, the Track Changes button asks for it.',
+          model: 'editor.revisionAuthor'
+        }
+      ]
+    },
+    {
+      title: 'Copy rendered elements',
+      infoString: 'When Markdown source is hidden, copy visible text from one enabled element or part of it. Selections extending outside that element keep the original Markdown. Cut and drag keep the original Markdown.',
+      group: PreferencesGroups.Editor,
+      fields: [
+        {
+          type: 'style-group',
+          style: 'columns',
+          fields: Object.entries(copyVisibleTextCategoryLabels).map(([ category, label ]) => ({
+            type: 'checkbox' as const,
+            label,
+            model: `display.copyVisibleTextCategories.${category}`,
+            info: category === 'math' ? 'Copy the LaTeX expression without its $ or $$ delimiters.'
+              : category === 'images' ? 'Copy image data when only one rendered image is selected.'
+                : category === 'codeBlocks' ? 'Copy selected code without fences or language information, including multiple lines within one code block.' : undefined
+          }))
+        }
+      ]
+    },
+    {
       title: trans('Default Formatting Characters'),
       infoString: trans('Select the characters Zettlr should use when marking text as bold or italic.'),
       group: PreferencesGroups.Editor,
@@ -277,25 +355,85 @@ export function getEditorFields (config: ConfigOptions): PreferencesFieldset[] {
         }
       ]
     },
+    // Zettlr-LYH: the "Image size" group (display.imageWidth and
+    // display.imageHeight) was removed. The editor never used these settings,
+    // and Export to HTML now sizes images by the editor's rules as well.
     {
-      title: trans('Image size'),
-      infoString: trans('Restrict images to a percentage of the available editor width and height.'),
+      // Zettlr-LYH (R64): indentation and background of rendered blockquotes
+      title: trans('Blockquotes'),
+      infoString: trans('Indent rendered blockquotes on both sides and choose their background color. While the cursor is inside a blockquote, it shows neither.'),
       group: PreferencesGroups.Editor,
       help: undefined, // TODO
       fields: [
         {
-          type: 'slider',
-          label: trans('Restrict width to %s %', config.display.imageWidth),
+          type: 'number',
+          label: trans('Indentation on each side (in em):'),
+          inline: true,
           min: 0,
-          max: 100,
-          model: 'display.imageWidth'
+          max: 10,
+          reset: 2,
+          model: 'display.blockquoteIndent'
         },
         {
-          type: 'slider',
-          label: trans('Restrict height to %s %', config.display.imageHeight),
-          min: 0,
-          max: 100,
-          model: 'display.imageHeight'
+          type: 'control-grid',
+          header: [ '', trans('Background color'), '' ],
+          rows: [
+            [
+              { type: 'form-text', display: 'plain', contents: trans('Light mode') },
+              { type: 'color', model: 'display.blockquoteBackgroundLight' },
+              { type: 'checkbox', label: trans('Transparent'), model: 'display.blockquoteBackgroundLightTransparent' }
+            ],
+            [
+              { type: 'form-text', display: 'plain', contents: trans('Dark mode') },
+              { type: 'color', model: 'display.blockquoteBackgroundDark' },
+              { type: 'checkbox', label: trans('Transparent'), model: 'display.blockquoteBackgroundDarkTransparent' }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      // Zettlr-LYH: size and weight of the six heading levels
+      title: trans('Headings'),
+      infoString: trans('Size of each heading level relative to the body text, and whether it is bold.'),
+      group: PreferencesGroups.Editor,
+      help: undefined, // TODO
+      fields: [
+        {
+          type: 'control-grid',
+          header: [ '', trans('Size (relative to body text)'), '' ],
+          rows: [
+            [
+              { type: 'form-text', display: 'plain', contents: trans('Level %s', 1) },
+              { type: 'number', min: 0.5, max: 5, step: 0.1, reset: 2, model: 'display.headingSize1' },
+              { type: 'checkbox', label: trans('Bold'), model: 'display.headingBold1' }
+            ],
+            [
+              { type: 'form-text', display: 'plain', contents: trans('Level %s', 2) },
+              { type: 'number', min: 0.5, max: 5, step: 0.1, reset: 1.8, model: 'display.headingSize2' },
+              { type: 'checkbox', label: trans('Bold'), model: 'display.headingBold2' }
+            ],
+            [
+              { type: 'form-text', display: 'plain', contents: trans('Level %s', 3) },
+              { type: 'number', min: 0.5, max: 5, step: 0.1, reset: 1.5, model: 'display.headingSize3' },
+              { type: 'checkbox', label: trans('Bold'), model: 'display.headingBold3' }
+            ],
+            [
+              { type: 'form-text', display: 'plain', contents: trans('Level %s', 4) },
+              { type: 'number', min: 0.5, max: 5, step: 0.1, reset: 1.3, model: 'display.headingSize4' },
+              { type: 'checkbox', label: trans('Bold'), model: 'display.headingBold4' }
+            ],
+            [
+              { type: 'form-text', display: 'plain', contents: trans('Level %s', 5) },
+              { type: 'number', min: 0.5, max: 5, step: 0.1, reset: 1, model: 'display.headingSize5' },
+              { type: 'checkbox', label: trans('Bold'), model: 'display.headingBold5' }
+            ],
+            [
+              { type: 'form-text', display: 'plain', contents: trans('Level %s', 6) },
+              { type: 'number', min: 0.5, max: 5, step: 0.1, reset: 1, model: 'display.headingSize6' },
+              { type: 'checkbox', label: trans('Bold'), model: 'display.headingBold6' }
+            ]
+          ]
         }
       ]
     },
@@ -309,6 +447,15 @@ export function getEditorFields (config: ConfigOptions): PreferencesFieldset[] {
           label: trans('Font size in pixels:'),
           inline: true,
           model: 'editor.fontSize'
+        },
+        {
+          type: 'number',
+          label: 'Line number font size in pixels (0 = editor size minus 4):',
+          inline: true,
+          min: 0,
+          max: 96,
+          reset: 0,
+          model: 'editor.lineNumberFontSize'
         }
       ]
     },
@@ -369,7 +516,7 @@ export function getEditorFields (config: ConfigOptions): PreferencesFieldset[] {
       fields: [
         {
           type: 'checkbox',
-          label: trans('Show formatting toolbar when text is selected'),
+          label: trans('Show formatting toolbar below the toolbar'),
           model: 'editor.showFormattingToolbar'
         },
         {
@@ -396,12 +543,36 @@ export function getEditorFields (config: ConfigOptions): PreferencesFieldset[] {
           type: 'checkbox',
           label: trans('Accept autocomplete suggestion with Tab'),
           model: 'editor.autocompleteWithTab'
+        }
+      ]
+    },
+    {
+      title: 'Automatically close matching character pairs',
+      infoString: 'Only pairs supported by the current language are closed. Quote options include triple quotes where supported. Code fences completes a closing fence (``` or ~~~) when Enter is pressed after three or more backticks or tildes. Smart quote replacement and wrapping use their existing settings and rules.',
+      group: PreferencesGroups.Editor,
+      fields: [
+        {
+          type: 'style-group',
+          style: 'columns',
+          fields: Object.entries(characterPairLabels).map(([ pair, label ]) => ({
+            type: 'checkbox' as const,
+            label,
+            model: `editor.autoCloseCharacterPairs.${pair}`
+          }))
         },
         {
-          // TODO: Where should this setting go?
-          type: 'checkbox',
-          label: trans('Automatically close matching character pairs'),
-          model: 'editor.autoCloseBrackets'
+          type: 'button',
+          label: 'Select all',
+          onClick: () => {
+            useConfigStore().setConfigValue('editor.autoCloseCharacterPairs', normalizeCharacterPairSettings(undefined))
+          }
+        },
+        {
+          type: 'button',
+          label: 'Deselect all',
+          onClick: () => {
+            useConfigStore().setConfigValue('editor.autoCloseCharacterPairs', normalizeCharacterPairSettings(undefined, false))
+          }
         }
       ]
     }

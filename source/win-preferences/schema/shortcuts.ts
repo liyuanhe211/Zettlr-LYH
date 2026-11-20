@@ -286,6 +286,14 @@ export function getShortcutFields (config: ConfigOptions): PreferencesFieldset[]
           model: 'shortcuts.ui.filter-files',
           defaultShortcut: defaultUIShortcut('filter-files'),
           conflicts: conflicts('filter-files')
+        },
+        // Zettlr-LYH reopen closed tab (R43)
+        {
+          type: 'shortcut',
+          label: trans('Reopen Closed Tab'),
+          model: 'shortcuts.ui.reopen-closed-tab',
+          defaultShortcut: defaultUIShortcut('reopen-closed-tab'),
+          conflicts: conflicts('reopen-closed-tab')
         }
       ]
     }
