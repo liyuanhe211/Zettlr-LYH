@@ -19,6 +19,7 @@ import type { EditorView } from '@codemirror/view'
 import type { SyntaxNode } from '@lezer/common'
 import type { Table } from 'source/common/modules/markdown-utils/markdown-ast'
 import { parseTableNode } from 'source/common/modules/markdown-utils/markdown-ast/parse-table-node'
+import { collectTableNodes, splitBlockquotePrefix } from '../util/table-nodes'
 
 /**
  * Describes a cell offset struct returned by `getTableCellOffsets`. It contains
@@ -68,7 +69,9 @@ export interface SelectionTableContext {
  * @return  {boolean}        Whether it appears to be a delimiter row.
  */
 export function isPipeTableDelimRow (line: string): boolean {
-  return /^[\s|+:-]+$/.test(line) && line.includes('-')
+  // Zettlr-LYH: The row of a table inside a blockquote begins with its markers
+  const [ , row ] = splitBlockquotePrefix(line)
+  return /^[\s|+:-]+$/.test(row) && row.includes('-')
 }
 
 /**
@@ -201,12 +204,16 @@ export function getColIndicesByRanges (
  * header delimiting table row in a pipe table (e.g., `--|--|--`). NOTE: By
  * definition these are the *outer* margins of the cells.
  *
- * @param   {string}              line       The line text
+ * @param   {string}              fullLine   The line text
  * @param   {string}              delimChar  The delimiter char (e.g., | or +)
  *
  * @return  {[number, number][]}             The offsets
  */
-export function getDelimiterLineCellOffsets (line: string, delimChar: string): [number, number][] {
+export function getDelimiterLineCellOffsets (fullLine: string, delimChar: string): [number, number][] {
+  // Zettlr-LYH: The row of a table inside a blockquote begins with its
+  // markers. The offsets are computed on the rest of the line and then
+  // shifted, so that they still refer to the full line.
+  const [ prefix, line ] = splitBlockquotePrefix(fullLine)
   const offsets: [number, number][] = []
   let from = 0
   for (let i = 0; i < line.length; i++) {
@@ -226,7 +233,7 @@ export function getDelimiterLineCellOffsets (line: string, delimChar: string): [
     offsets.push([ from, line.length - 1 ])
   }
 
-  return offsets
+  return offsets.map(([ cellFrom, cellTo ]) => [ cellFrom + prefix.length, cellTo + prefix.length ])
 }
 
 /**
@@ -274,8 +281,8 @@ export function mapSelectionsWithTables<T> (
   target: EditorView,
   callback: (ctx: SelectionTableContext) => T|undefined
 ): T[] {
-  // TODO: Is not recursive! Need to iter!
-  const tableNodes = syntaxTree(target.state).topNode.getChildren('Table')
+  // Zettlr-LYH: The tables at the top level and inside blockquotes
+  const tableNodes = collectTableNodes(syntaxTree(target.state))
 
   // First, collect all tables and their contained selections, since there may
   // be multiple selections in each table. This ensures that each table will

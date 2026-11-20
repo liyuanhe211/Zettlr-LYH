@@ -14,9 +14,12 @@
  * END HEADER
  */
 
-import { type SelectionRange, EditorSelection, type ChangeSpec, type TransactionSpec } from '@codemirror/state'
+import { type SelectionRange, EditorSelection, type ChangeSpec, type EditorState, type TransactionSpec } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
-import { findColumnIndexByRange, findRowIndexByRange, getColIndicesByRanges, getDelimiterLineCellOffsets, mapSelectionsWithTables } from './util'
+import type { SyntaxNode } from '@lezer/common'
+import type { Table } from 'source/common/modules/markdown-utils/markdown-ast'
+import { findColumnIndexByRange, findRowIndexByRange, getColIndicesByRanges, getDelimiterLineCellOffsets, getTableCellOffsets, mapSelectionsWithTables } from './util'
+import { blockquotePrefixLength, emptyRowFromLine } from '../util/table-nodes'
 
 /**
  * Attempts to move all cursors/selections to the next cell. NOTE: This command
@@ -58,10 +61,12 @@ export function moveNextCell (target: EditorView): boolean {
           changes: {
             from: line.to,
             // Taken from rows.ts
-            insert: '\n' + line.text.replace(/[^\s\|]/g, '')
+            // Zettlr-LYH: Keeps the blockquote markers of a table in a blockquote
+            insert: '\n' + emptyRowFromLine(line.text)
           },
-          // Move the new cursor to the beginning of the new line.
-          selection: { anchor: line.to + 2 }
+          // Move the new cursor to the beginning of the new line (behind the
+          // first pipe, and behind the blockquote markers, if any).
+          selection: { anchor: line.to + 2 + blockquotePrefixLength(line.text) }
         }
       }
       
@@ -265,21 +270,24 @@ export function addColAfter (target: EditorView): boolean {
     const delimChar = delimLine.text.includes('+') ? '+' : '|' // Support emacs
     const delimOffsets = getDelimiterLineCellOffsets(delimLine.text, delimChar)
 
+    // Zettlr-LYH: A row with fewer cells than the column index (it leaves its
+    // last cells out) does not reach the column and stays as it is.
     const changes = [
       { from: delimLine.from + delimOffsets[idx][1], insert: `${delimChar}--` },
-      ...ctx.offsets.outer.flatMap(row => {
+      ...ctx.offsets.outer.filter(row => row[idx] !== undefined).map(row => {
         return { from: row[idx][1], insert: '|  ' }
       }).sort((a, b) => a.from - b.from)
     ]
 
     // Move the selection so that it ends up in the newly added column. NOTE
     // that we have to account for the added characters in the delimiter row.
-    const rangeLine = target.state.doc.lineAt(focusRange.head)
-    const firstLine = target.state.doc.lineAt(ctx.tableAST.from)
     const rowIdx = findRowIndexByRange(focusRange, ctx.offsets.outer)!
-    // First, move the range so that it stays in place
-    let moveBy = (rangeLine.number - firstLine.number) * 3
     const thisCellTo = ctx.offsets.outer[rowIdx][idx][1]
+    // First, move the range so that it stays in place (by the characters
+    // inserted before this cell's end)
+    let moveBy = changes
+      .filter(change => change.from < thisCellTo)
+      .reduce((sum, change) => sum + change.insert.length, 0)
     // Second, add enough characters to make the cursor end up in the added col.
     moveBy += thisCellTo - focusRange.to + 2
 
@@ -330,22 +338,26 @@ export function addColBefore (target: EditorView): boolean {
     // Now, for each row, calculate a change that adds ' | ' before the cell's
     // from position. We also need to add '-|-' to the delimiter
 
+    // Zettlr-LYH: A row with fewer cells than the column index (it leaves its
+    // last cells out) does not reach the column and stays as it is.
     const changes = [
       { from: delimLine.from + delimOffsets[idx][0], insert: `--${delimChar}` },
-      ...ctx.offsets.outer.flatMap(row => {
+      ...ctx.offsets.outer.filter(row => row[idx] !== undefined).map(row => {
         return { from: row[idx][0], insert: '  |' }
       }).sort((a, b) => a.from - b.from)
     ]
 
     // Move the selection so that it ends up in the newly added column. NOTE
     // that we have to account for the added characters in the delimiter row.
-    const rangeLine = target.state.doc.lineAt(focusRange.head)
-    const firstLine = target.state.doc.lineAt(ctx.tableAST.from)
-    // First, move the range so that it stays in place
-    let moveBy = (rangeLine.number - firstLine.number + 1) * 3
-    // Second, remove characters to make the cursor end up in the added col.
     const rowIdx = findRowIndexByRange(focusRange, ctx.offsets.outer)!
-    const cellOffset = focusRange.from - ctx.offsets.outer[rowIdx][idx][0]
+    const thisCellFrom = ctx.offsets.outer[rowIdx][idx][0]
+    // First, move the range so that it stays in place (by the characters
+    // inserted up to this cell's start, including its own row's insertion)
+    let moveBy = changes
+      .filter(change => change.from <= thisCellFrom)
+      .reduce((sum, change) => sum + change.insert.length, 0)
+    // Second, remove characters to make the cursor end up in the added col.
+    const cellOffset = focusRange.from - thisCellFrom
     moveBy -= cellOffset + 2
 
     return {
@@ -365,6 +377,85 @@ export function addColBefore (target: EditorView): boolean {
 }
 
 /**
+ * Builds the changes that delete entire columns from a table. The column
+ * indices refer to the cells of `tableAST.rows`. The cursor command `deleteCol`
+ * and the deletion of a selected range of cells share this function. Only pipe
+ * tables are supported; for a grid table, there are no changes.
+ *
+ * @param   {EditorState}  state          The editor state
+ * @param   {SyntaxNode}   tableNode      The table's syntax node
+ * @param   {Table}        tableAST       The parsed table
+ * @param   {number[]}     columnIndices  The indices of the columns to delete
+ *
+ * @return  {ChangeSpec[]}                The changes, relative to the current
+ *                                        document (empty if there is nothing to
+ *                                        do)
+ */
+export function buildColumnDeletionChanges (
+  state: EditorState,
+  tableNode: SyntaxNode,
+  tableAST: Table,
+  columnIndices: number[]
+): ChangeSpec[] {
+  // Only support this in pipe tables. TODO
+  if (tableAST.tableType !== 'pipe') {
+    return []
+  }
+
+  // NOTE: The parser always provides a delimiter row for a valid pipe table
+  const delimiterNode = tableNode.getChild('TableDelimiter')
+  if (delimiterNode === null) {
+    return []
+  }
+
+  // The cells of every row, from their outer limits (including the padding)
+  const cellOffsets = getTableCellOffsets(tableAST).outer
+  if (cellOffsets.length === 0) {
+    return []
+  }
+  // Zettlr-LYH: The delimiter row determines the columns; a row with fewer
+  // cells (it leaves its last cells out) loses only the cells it has.
+  const columnCount = tableAST.alignment.length
+  const sortedColumns = [...new Set(columnIndices)]
+    .filter(col => col >= 0 && col < columnCount)
+    .sort((a, b) => a - b)
+  if (sortedColumns.length === 0) {
+    return []
+  }
+
+  const delimiterLine = state.doc.lineAt(delimiterNode.from)
+  const delimiterCharacter = delimiterLine.text.includes('+') ? '+' : '|' // Support emacs
+  const delimiterOffsets = getDelimiterLineCellOffsets(delimiterLine.text, delimiterCharacter)
+  if (sortedColumns.some(col => delimiterOffsets[col] === undefined)) {
+    return []
+  }
+
+  // To delete a column, we basically just have to replace its inner cell
+  // content (incl. padding) plus the following delimiter (if applicable)
+  return [
+    // Handle the delimiter line
+    ...sortedColumns.map(col => {
+      const [ delimiterFrom, delimiterTo ] = delimiterOffsets[col]
+      return {
+        from: delimiterLine.from + delimiterFrom,
+        to: delimiterLine.from + (delimiterTo < delimiterLine.text.length ? delimiterTo + 1 : delimiterTo),
+        insert: ''
+      }
+    }),
+    ...cellOffsets.flatMap(row => {
+      return sortedColumns.filter(col => row[col] !== undefined).map(col => {
+        const [ from, to ] = row[col]
+        const line = state.doc.lineAt(from)
+        // Take the following char after `to` iff we're not at the end of the
+        // line. The last cell of a row without a trailing pipe may reach beyond
+        // the end of the line, which must stay.
+        return { from, to: to < line.to ? to + 1 : Math.min(to, line.to), insert: '' }
+      })
+    })
+  ]
+}
+
+/**
  * For each selection in the document that is within a table, delete the column
  * that contains the selection.
  *
@@ -373,43 +464,11 @@ export function addColBefore (target: EditorView): boolean {
  * @return  {boolean}             Whether or not changes have been made.
  */
 export function deleteCol (target: EditorView): boolean {
-  // To delete the current column, we basically just have to replace its inner
-  // cell content (incl. padding) plus the following delimiter (if applicable)
   const changes = mapSelectionsWithTables<ChangeSpec[]>(target, ctx => {
-    // Only support this in pipe tables. TODO
-    if (ctx.tableAST.tableType !== 'pipe') {
-      return undefined
-    }
-
-    const colIdx = getColIndicesByRanges(ctx.ranges, ctx.offsets.outer)
-
-    // NOTE: Remove `null` since that check will be performed during AST parsing
-    const delimNode = ctx.tableNode.getChild('TableDelimiter')!
-    const delimLine = target.state.doc.lineAt(delimNode.from)
-    const delimChar = delimLine.text.includes('+') ? '+' : '|' // Support emacs
-    const delimOffsets = getDelimiterLineCellOffsets(delimLine.text, delimChar)
-
-    return [
-      // Handle the delimiter line
-      ...colIdx.map(col => {
-        const [ delimFrom, delimTo ] = delimOffsets[col]
-        return {
-          from: delimLine.from + delimFrom,
-          to: delimLine.from + (delimTo < delimLine.text.length ? delimTo + 1 : delimTo),
-          insert: ''
-        }
-      }),
-      ...ctx.offsets.outer.flatMap(row => {
-        return colIdx.map(col => {
-          const [ from, to ] = row[col]
-          const line = target.state.doc.lineAt(from)
-          // Take the following char after `to` iff we're not at the end of the line
-          return { from, to: to < line.to ? to + 1 : to, insert: '' }
-        })
-      })
-    ]
+    const columnIndices = getColIndicesByRanges(ctx.ranges, ctx.offsets.outer)
+    return buildColumnDeletionChanges(target.state, ctx.tableNode, ctx.tableAST, columnIndices)
   }).flat()
-  
+
   if (changes.length > 0) {
     target.dispatch({ changes })
     return true

@@ -13,15 +13,26 @@
  *                  cells selects the rectangular range of cells between the
  *                  start and the current cell; the range can be copied to the
  *                  clipboard as tab-separated plain text and as an HTML table.
+ *                  If the range consists of entire rows, entire columns or the
+ *                  entire table, Delete and Backspace remove them; any other
+ *                  range cannot be deleted. While dragging, moving the mouse
+ *                  close to or beyond the edge of the scrolling container
+ *                  scrolls it, as in the rest of the editor.
  *
  * END HEADER
  */
 
 import { syntaxTree } from '@codemirror/language'
-import { type EditorState, Prec, StateEffect, StateField } from '@codemirror/state'
+import { type ChangeSpec, type EditorState, Prec, StateEffect, StateField, type TransactionSpec } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
+import type { SyntaxNode } from '@lezer/common'
+import type { Table } from '../../markdown-utils/markdown-ast'
 import { parseTableNode } from '../../markdown-utils/markdown-ast/parse-table-node'
+import { buildColumnDeletionChanges } from './commands/columns'
 import { buildTableClipboardHTML } from './commands/row-clipboard'
+import { buildRowDeletionChanges } from './commands/rows'
+import { buildTableDeletion } from './commands/tables'
+import { collectTableNodes } from './util/table-nodes'
 
 /**
  * The class of the table cells inside the selected range of cells.
@@ -45,6 +56,68 @@ const DRAG_THRESHOLD = 4
  * giving up on selecting text in it.
  */
 const MOUNT_WAIT_FRAMES = 10
+
+/**
+ * How close (in pixels) the mouse has to come to the edge of the scrolling
+ * container during a drag before it starts scrolling. Same as CodeMirror's own
+ * drag selection.
+ */
+const DRAG_SCROLL_MARGIN = 6
+
+/**
+ * How often (in milliseconds) the scrolling container scrolls while the mouse
+ * is held near its edge during a drag. Same as CodeMirror's own drag selection.
+ */
+const DRAG_SCROLL_INTERVAL = 50
+
+/**
+ * Computes how far (in pixels, per scroll step) a drag should scroll along one
+ * axis, given the mouse coordinate and the visible range of the scrolling
+ * container along that axis. Negative values scroll backwards (up or left),
+ * zero means no scrolling. The speed grows with the distance beyond the edge,
+ * as in CodeMirror's own drag selection.
+ *
+ * @param   {number}  pointer  The mouse coordinate
+ * @param   {number}  start    The start of the visible range (top or left)
+ * @param   {number}  end      The end of the visible range (bottom or right)
+ *
+ * @return  {number}           The scroll amount per step
+ */
+export function dragScrollAmount (pointer: number, start: number, end: number): number {
+  if (pointer <= start + DRAG_SCROLL_MARGIN) {
+    return -(Math.max(0, start - pointer) * 0.7 + 8)
+  } else if (pointer >= end - DRAG_SCROLL_MARGIN) {
+    return Math.max(0, pointer - end) * 0.7 + 8
+  }
+  return 0
+}
+
+/**
+ * Finds the nearest ancestors of an element that scroll horizontally and
+ * vertically.
+ *
+ * @param   {HTMLElement}  element  The element
+ *
+ * @return  {{ x: HTMLElement|null, y: HTMLElement|null }}  The scrolling
+ *                                  ancestors (null: the window scrolls)
+ */
+function scrollingAncestors (element: HTMLElement): { x: HTMLElement|null, y: HTMLElement|null } {
+  let x: HTMLElement|null = null
+  let y: HTMLElement|null = null
+  for (let current = element.parentElement; current !== null && current !== document.body; current = current.parentElement) {
+    const style = getComputedStyle(current)
+    if (x === null && current.scrollWidth > current.clientWidth && style.overflowX !== 'visible' && style.overflowX !== 'hidden') {
+      x = current
+    }
+    if (y === null && current.scrollHeight > current.clientHeight && style.overflowY !== 'visible' && style.overflowY !== 'hidden') {
+      y = current
+    }
+    if (x !== null && y !== null) {
+      break
+    }
+  }
+  return { x, y }
+}
 
 export interface CellCoordinates {
   row: number
@@ -193,6 +266,152 @@ export function buildCellRangeClipboard (cellTexts: string[][]): { plainText: st
 }
 
 /**
+ * What deleting a range of cells does: `table` deletes the entire table, `rows`
+ * the rows of the range, `columns` the columns of the range, and `none` means
+ * that the range cannot be deleted.
+ */
+export type CellRangeDeletionKind = 'table'|'rows'|'columns'|'none'
+
+/**
+ * Determines what deleting a range of cells would delete. Only entire rows
+ * (the range spans all columns), entire columns (the range spans all rows) or
+ * the entire table (both) can be deleted. A single cell is only deletable if it
+ * is the whole row or the whole column, i.e., if the table has only one column
+ * or only one row.
+ *
+ * @param   {CellRangeBounds}          bounds       The bounds of the range
+ * @param   {number}                   rowCount     The number of rows in the
+ *                                                  table, including the header
+ * @param   {number}                   columnCount  The number of columns
+ *
+ * @return  {CellRangeDeletionKind}                 What the range can delete
+ */
+export function classifyCellRangeForDeletion (
+  bounds: CellRangeBounds,
+  rowCount: number,
+  columnCount: number
+): CellRangeDeletionKind {
+  if (rowCount < 1 || columnCount < 1) {
+    return 'none'
+  }
+
+  const coversAllColumns = bounds.left <= 0 && bounds.right >= columnCount - 1
+  const coversAllRows = bounds.top <= 0 && bounds.bottom >= rowCount - 1
+
+  if (coversAllColumns && coversAllRows) {
+    return 'table'
+  } else if (coversAllColumns) {
+    return 'rows'
+  } else if (coversAllRows) {
+    return 'columns'
+  } else {
+    return 'none'
+  }
+}
+
+/**
+ * Lists the integers from `first` to `last` (both included).
+ *
+ * @param   {number}    first  The first integer
+ * @param   {number}    last   The last integer
+ *
+ * @return  {number[]}         The integers
+ */
+function integersBetween (first: number, last: number): number[] {
+  return Array.from({ length: Math.max(0, last - first + 1) }, (_item, offset) => first + offset)
+}
+
+/**
+ * Finds the table a range of cells belongs to and parses it.
+ *
+ * @param   {EditorState}          state  The main editor state
+ * @param   {CellRangeSelection}   range  The range of cells
+ *
+ * @return  {{ tableNode: SyntaxNode, tableAST: Table }|undefined}  The table's
+ *                                        syntax node and the parsed table, if
+ *                                        it exists
+ */
+function findCellRangeTable (
+  state: EditorState,
+  range: CellRangeSelection
+): { tableNode: SyntaxNode, tableAST: Table }|undefined {
+  const tableNode = collectTableNodes(syntaxTree(state))
+    .find(node => node.from <= range.tableFrom && node.to >= range.tableFrom)
+  if (tableNode === undefined) {
+    return undefined
+  }
+
+  const tableAST = parseTableNode(tableNode, state.sliceDoc())
+  return tableAST.type === 'Table' ? { tableNode, tableAST } : undefined
+}
+
+/**
+ * Plans the deletion of a range of cells. The range index of a row is its
+ * index in the parsed table (the header row is 0, the delimiter row of a pipe
+ * table does not count), which is also the index of the table row in the
+ * rendered table.
+ *
+ * @param   {EditorState}          state  The main editor state
+ * @param   {CellRangeSelection}   range  The range of cells
+ *
+ * @return  {TransactionSpec|undefined}   The transaction that deletes the
+ *                                        entire rows, the entire columns or the
+ *                                        entire table of the range as one step,
+ *                                        or undefined if the range cannot be
+ *                                        deleted (or deleting it would not
+ *                                        change the document)
+ */
+export function planCellRangeDeletion (
+  state: EditorState,
+  range: CellRangeSelection
+): TransactionSpec|undefined {
+  const table = findCellRangeTable(state, range)
+  if (table === undefined) {
+    return undefined
+  }
+
+  const { tableNode, tableAST } = table
+  const rowCount = tableAST.rows.length
+  const columnCount = tableAST.rows[0]?.cells.length ?? 0
+  if (tableAST.rows.some(row => row.cells.length !== columnCount)) {
+    return undefined // The rows of the table don't line up
+  }
+
+  const bounds = cellRangeBounds(range)
+  const rowsInRange = integersBetween(Math.max(0, bounds.top), Math.min(rowCount - 1, bounds.bottom))
+  const columnsInRange = integersBetween(Math.max(0, bounds.left), Math.min(columnCount - 1, bounds.right))
+
+  let changes: ChangeSpec[]
+  switch (classifyCellRangeForDeletion(bounds, rowCount, columnCount)) {
+    case 'table':
+      return buildTableDeletion(state, tableAST.from, tableAST.to)
+    case 'rows':
+      changes = buildRowDeletionChanges(state, tableNode, tableAST, rowsInRange)
+      break
+    case 'columns':
+      changes = buildColumnDeletionChanges(state, tableNode, tableAST, columnsInRange)
+      break
+    default:
+      return undefined
+  }
+
+  return changes.length > 0 ? { changes } : undefined
+}
+
+/**
+ * Checks whether a key press asks to delete the selected cells: Delete or
+ * Backspace, without any modifier.
+ *
+ * @param   {KeyboardEvent}  event  The key press
+ *
+ * @return  {boolean}               Whether it is a deletion
+ */
+function isCellRangeDeletionKey (event: KeyboardEvent): boolean {
+  return (event.key === 'Delete' || event.key === 'Backspace') &&
+    !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+}
+
+/**
  * Writes the selected range of cells to the clipboard of a copy event.
  *
  * @param   {EditorView}      view   The main view
@@ -206,17 +425,12 @@ function copyCellRange (view: EditorView, event: ClipboardEvent): boolean {
     return false
   }
 
-  const tableNode = syntaxTree(view.state).topNode.getChildren('Table')
-    .find(node => node.from <= range.tableFrom && node.to >= range.tableFrom)
-  if (tableNode === undefined) {
+  const table = findCellRangeTable(view.state, range)
+  if (table === undefined) {
     return false
   }
 
-  const tableAST = parseTableNode(tableNode, view.state.sliceDoc())
-  if (tableAST.type !== 'Table') {
-    return false
-  }
-
+  const tableAST = table.tableAST
   const cellTexts = tableAST.rows.map(row => {
     return row.cells.map(cell => view.state.sliceDoc(cell.from, cell.to).trim())
   })
@@ -231,10 +445,13 @@ function copyCellRange (view: EditorView, event: ClipboardEvent): boolean {
 /**
  * While a range of cells is selected, the main view has the keyboard focus,
  * and its cursor sits inside the table's source. Copying writes the cells to
- * the clipboard. Any other key (apart from lone modifiers) only ends the cell
- * selection, so that no keystroke can edit the table's source behind the
- * rendered table; the cursor then returns into the cell where the drag
- * started.
+ * the clipboard. Delete and Backspace delete the selected cells if they are
+ * entire rows, entire columns or the entire table (see
+ * `planCellRangeDeletion`); the deletion ends the cell selection. If the cells
+ * are anything else, the key press changes nothing and the cell selection stays.
+ * Any other key (apart from lone modifiers) only ends the cell selection, so
+ * that no keystroke can edit the table's source behind the rendered table; the
+ * cursor then returns into the cell where the drag started.
  */
 const cellRangeSelectionHandlers = Prec.highest(EditorView.domEventHandlers({
   copy (event, view) {
@@ -256,6 +473,17 @@ const cellRangeSelectionHandlers = Prec.highest(EditorView.domEventHandlers({
     }
 
     event.preventDefault()
+
+    if (isCellRangeDeletionKey(event)) {
+      // The deletion changes the document, which ends the cell selection. If
+      // there is nothing to delete, the cell selection stays.
+      const deletion = planCellRangeDeletion(view.state, range)
+      if (deletion !== undefined) {
+        view.dispatch(deletion)
+      }
+      return true
+    }
+
     view.dispatch({ effects: setCellRangeSelection.of(null) })
     return true
   }
@@ -371,6 +599,9 @@ export function trackCellDrag (
   let point = { x: startEvent.clientX, y: startEvent.clientY }
   let waitFrame: number|undefined
   let waitFramesLeft = 0
+  const scrollers = scrollingAncestors(table)
+  let scrollSpeed = { x: 0, y: 0 }
+  let scrollTimer: ReturnType<typeof setInterval>|undefined
 
   const selectTextInStartingCell = (): void => {
     if (waitFrame !== undefined) {
@@ -411,6 +642,64 @@ export function trackCellDrag (
       dragging = true
     }
 
+    updateSelection()
+    updateScrollSpeed()
+  }
+
+  // Scrolls the container while the mouse is near or beyond its edge. While
+  // the drag stays in the starting cell and that cell's editor handles it
+  // natively, the cell's editor already scrolls on its own.
+  const updateScrollSpeed = (): void => {
+    let sx = 0
+    let sy = 0
+    if (inCellRange || !nativeSelection || leftStartingCell) {
+      const xRect = scrollers.x?.getBoundingClientRect() ?? { left: 0, right: window.innerWidth }
+      const yRect = scrollers.y?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight }
+      sx = dragScrollAmount(point.x, xRect.left, xRect.right)
+      sy = dragScrollAmount(point.y, yRect.top, yRect.bottom)
+    }
+
+    scrollSpeed = { x: sx, y: sy }
+    if (sx !== 0 || sy !== 0) {
+      if (scrollTimer === undefined) {
+        scrollTimer = setInterval(scrollStep, DRAG_SCROLL_INTERVAL)
+      }
+    } else {
+      stopScrolling()
+    }
+  }
+
+  const scrollStep = (): void => {
+    if (!table.isConnected) {
+      finish()
+      return
+    }
+
+    let { x, y } = scrollSpeed
+    if (x !== 0 && scrollers.x !== null) {
+      scrollers.x.scrollLeft += x
+      x = 0
+    }
+    if (y !== 0 && scrollers.y !== null) {
+      scrollers.y.scrollTop += y
+      y = 0
+    }
+    if (x !== 0 || y !== 0) {
+      window.scrollBy(x, y)
+    }
+
+    // The content has moved under the (unmoved) mouse
+    updateSelection()
+  }
+
+  const stopScrolling = (): void => {
+    if (scrollTimer !== undefined) {
+      clearInterval(scrollTimer)
+      scrollTimer = undefined
+    }
+  }
+
+  const updateSelection = (): void => {
     const head = cellCoordinatesAt(table, point.x, point.y)
     if (head === undefined) {
       return
@@ -444,6 +733,7 @@ export function trackCellDrag (
   }
 
   const finish = (): void => {
+    stopScrolling()
     document.removeEventListener('mousemove', onMove)
     document.removeEventListener('mouseup', finish)
     if (endActiveDrag === finish) {

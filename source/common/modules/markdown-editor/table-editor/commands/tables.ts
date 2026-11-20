@@ -16,7 +16,8 @@
 
 import type { EditorView } from '@codemirror/view'
 import { findColumnIndexByRange, getDelimiterLineCellOffsets, mapSelectionsWithTables } from './util'
-import { EditorSelection, type ChangeSpec, type TransactionSpec } from '@codemirror/state'
+import { splitBlockquotePrefix } from '../util/table-nodes'
+import { EditorSelection, type ChangeSpec, type EditorState, type TransactionSpec } from '@codemirror/state'
 import type { SyntaxNode } from '@lezer/common'
 
 /**
@@ -120,6 +121,52 @@ export function deleteTable (target: EditorView): boolean {
   }
 }
 
+/**
+ * Builds the transaction that removes a whole table from the document, used
+ * when a selected range of cells covers the entire table. The table's lines go
+ * away together with a line break, so that the surrounding text is not joined.
+ * If the table was separated from the text before and after it by blank lines
+ * (or sat at the very start of the document), one of these blank lines goes as
+ * well, which keeps a single blank line between the remaining paragraphs. For a
+ * table at the very end of the document, the line break before it is removed.
+ * The cursor ends up where the table started.
+ *
+ * @param   {EditorState}      state  The editor state
+ * @param   {number}           from   The start of the table
+ * @param   {number}           to     The end of the table (a grid table's end
+ *                                    includes the line break after its last line)
+ *
+ * @return  {TransactionSpec}         The transaction
+ */
+export function buildTableDeletion (state: EditorState, from: number, to: number): TransactionSpec {
+  const doc = state.doc
+  const firstLine = doc.lineAt(from)
+  const lastLine = doc.lineAt(Math.max(from, to - 1))
+  const hasLineBefore = firstLine.number > 1
+  const hasLineAfter = lastLine.number < doc.lines
+  let deleteFrom = firstLine.from
+  let deleteTo = lastLine.to
+
+  if (hasLineAfter) {
+    // Take the table's line break along
+    deleteTo = lastLine.to + 1
+    const lineAfter = doc.line(lastLine.number + 1)
+    const isSeparatedBefore = !hasLineBefore || doc.line(firstLine.number - 1).text.trim() === ''
+    if (isSeparatedBefore && lineAfter.text.trim() === '') {
+      // Two blank lines would meet: Take one of them along
+      deleteTo = Math.min(lineAfter.to + 1, doc.length)
+    }
+  } else if (hasLineBefore) {
+    // The last line has no line break after it: Take the one before it
+    deleteFrom = firstLine.from - 1
+  }
+
+  return {
+    changes: { from: deleteFrom, to: deleteTo, insert: '' },
+    selection: EditorSelection.cursor(deleteFrom)
+  }
+}
+
 // Utility/Helper function that adds appropriate spacing
 export function alignTables (target: EditorView, pos?: number): boolean {
   const tr = mapSelectionsWithTables<TransactionSpec>(target, ctx => {
@@ -135,16 +182,19 @@ export function alignTables (target: EditorView, pos?: number): boolean {
       return row.map(cell => cell.length)
     })
 
+    // Zettlr-LYH: The delimiter row determines the number of columns. A row
+    // with fewer cells receives empty cells at its end.
+    const columnCount = ctx.tableAST.alignment.length
     const targetColumnSizes = []
-    for (let i = 0; i < cellSizes[0].length; i++) {
-      targetColumnSizes.push(Math.max(...cellSizes.map(row => row[i])) + 2)
+    for (let i = 0; i < columnCount; i++) {
+      targetColumnSizes.push(Math.max(...cellSizes.map(row => row[i] ?? 0)) + 2)
     }
 
     const newContents: string[][] = []
     for (let i = 0; i < cellContents.length; i++) {
       newContents.push([])
-      for (let j = 0; j < cellContents[0].length; j++) {
-        const cell = cellContents[i][j]
+      for (let j = 0; j < columnCount; j++) {
+        const cell = cellContents[i][j] ?? ''
         const pad = targetColumnSizes[j] - cell.length
         switch (ctx.tableAST.alignment[j]) {
           case 'right':
@@ -185,10 +235,15 @@ export function alignTables (target: EditorView, pos?: number): boolean {
 
     console.log({ cellContents, newRows, newContents, cellSizes, targetColumnSizes })
 
+    // Zettlr-LYH: Every line of a table inside a blockquote begins with the
+    // blockquote markers. The first line keeps its own (the table starts
+    // behind them), and the other lines receive the same markers.
+    const [ prefix ] = splitBlockquotePrefix(target.state.doc.lineAt(ctx.tableAST.from).text)
+
     return {
       changes: {
         from: ctx.tableAST.from, to: ctx.tableAST.to,
-        insert: newRows.join('\n')
+        insert: newRows.join('\n' + prefix)
       }
     }
   })

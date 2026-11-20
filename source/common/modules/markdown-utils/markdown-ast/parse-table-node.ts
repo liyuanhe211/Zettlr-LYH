@@ -133,6 +133,14 @@ export function parseTableNode (node: SyntaxNode, markdown: string): Table|TextN
       continue // Skip the delimiting row
     }
 
+    // Zettlr-LYH: In a table inside a blockquote, the blockquote markers at
+    // the start of the second and following lines are QuoteMark children of
+    // the Table node, between its rows. They do not belong to any row.
+    if (row.name === 'QuoteMark') {
+      row = row.nextSibling
+      continue
+    }
+
     const tableRow: TableRow = {
       type: 'TableRow',
       name: row.name,

@@ -24,6 +24,7 @@ import type { EditorView } from '@codemirror/view'
 import { parseTableNode } from 'source/common/modules/markdown-utils/markdown-ast/parse-table-node'
 import { findColumnIndexByRange, findRowIndexByRange, getTableCellOffsets } from './commands/util'
 import { sourceOffsetForCellClick } from './cell-caret'
+import { collectTableNodes } from './util/table-nodes'
 
 /**
  * The line break that Enter inserts into a table cell.
@@ -88,7 +89,7 @@ export function lineBreakEndPositions (text: string, offset: number): number[] {
  *                                                         inside a table cell
  */
 export function neighborCellTarget (state: EditorState, cellPosition: number, direction: CellDirection): CellNavigationTarget|undefined {
-  const tableNode = syntaxTree(state).topNode.getChildren('Table')
+  const tableNode = collectTableNodes(syntaxTree(state))
     .find(node => node.from <= cellPosition && node.to >= cellPosition)
   if (tableNode === undefined) {
     return undefined

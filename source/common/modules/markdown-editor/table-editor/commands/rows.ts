@@ -14,9 +14,12 @@
  * END HEADER
  */
 
-import { type SelectionRange, EditorSelection, type TransactionSpec } from '@codemirror/state'
+import { type SelectionRange, EditorSelection, type ChangeSpec, type EditorState, type Line, type TransactionSpec } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
+import type { SyntaxNode } from '@lezer/common'
+import type { Table } from 'source/common/modules/markdown-utils/markdown-ast'
 import { findColumnIndexByRange, findRowIndexByRange, getRowIndicesByRanges, isGridTableDelimRow, isPipeTableDelimRow, mapSelectionsWithTables } from './util'
+import { emptyRowFromLine } from '../util/table-nodes'
 
 /**
  * This command takes all editor selections and moves those within tables to the
@@ -247,7 +250,8 @@ export function addRowAfter (target: EditorView): boolean {
         isHeader = true
       }
 
-      const newRow = thisLine.text.replace(/[^\s\|]/g, '')
+      // Zettlr-LYH: Keeps the blockquote markers of a table in a blockquote
+      const newRow = emptyRowFromLine(thisLine.text)
       // The new row begins right after the inserted newline character
       const newRowStart = (isHeader && nextLine !== undefined ? nextLine.to : thisLine.to) + 1
       // Place the selection at the same column in the new row, clamped to its
@@ -324,7 +328,8 @@ export function addRowBefore (target: EditorView): boolean {
         selection: { anchor: focusRange.anchor, head: focusRange.head },
         changes: {
           from: thisLine.from,
-          insert: thisLine.text.replace(/[^\s\|]/g, '') + '\n'
+          // Zettlr-LYH: Keeps the blockquote markers of a table in a blockquote
+          insert: emptyRowFromLine(thisLine.text) + '\n'
         }
       }
     } else {
@@ -355,6 +360,95 @@ export function addRowBefore (target: EditorView): boolean {
 }
 
 /**
+ * Builds the change that removes a whole line including the line break after
+ * it. The last line of the document has no line break after it, so only its
+ * text is removed.
+ *
+ * @param   {EditorState}  state  The editor state
+ * @param   {Line}         line   The line to remove
+ *
+ * @return  {ChangeSpec}          The change
+ */
+function wholeLineRemoval (state: EditorState, line: Line): ChangeSpec {
+  return { from: line.from, to: Math.min(line.to + 1, state.doc.length), insert: '' }
+}
+
+/**
+ * Builds the changes that delete entire rows from a table. The row indices
+ * refer to `tableAST.rows`: The header row has index 0, and the delimiter row of
+ * a pipe table does not count. The cursor command `deleteRow` and the deletion
+ * of a selected range of cells share this function.
+ *
+ * If a pipe table's header row is deleted, the first remaining row becomes the
+ * new header row, which means that the delimiter row moves below it. If every
+ * row is deleted, the delimiter row is deleted as well. In a grid table, every
+ * row is removed together with the delimiter line that follows it.
+ *
+ * @param   {EditorState}  state       The editor state
+ * @param   {SyntaxNode}   tableNode   The table's syntax node
+ * @param   {Table}        tableAST    The parsed table
+ * @param   {number[]}     rowIndices  The indices of the rows to delete
+ *
+ * @return  {ChangeSpec[]}             The changes, relative to the current
+ *                                     document (empty if there is nothing to do)
+ */
+export function buildRowDeletionChanges (
+  state: EditorState,
+  tableNode: SyntaxNode,
+  tableAST: Table,
+  rowIndices: number[]
+): ChangeSpec[] {
+  const doc = state.doc
+  const indices = [...new Set(rowIndices)]
+    .filter(index => index >= 0 && index < tableAST.rows.length)
+    .sort((a, b) => a - b)
+  if (indices.length === 0) {
+    return []
+  }
+
+  const rowLines = tableAST.rows.map(row => doc.lineAt(row.from))
+  const changes: ChangeSpec[] = []
+
+  if (tableAST.tableType === 'pipe') {
+    // The delimiter row is not part of the AST, but a direct child of the table
+    const delimiterNode = tableNode.getChild('TableDelimiter')
+    if (delimiterNode === null) {
+      return []
+    }
+    const delimiterLine = doc.lineAt(delimiterNode.from)
+    const deletedRows = new Set(indices)
+
+    for (const index of indices) {
+      changes.push(wholeLineRemoval(state, rowLines[index]))
+    }
+
+    if (deletedRows.has(0)) {
+      // The header row is gone, so the delimiter row has to leave its place,
+      // and, unless nothing remains, move below the new header row (the first
+      // row that is not deleted).
+      changes.push(wholeLineRemoval(state, delimiterLine))
+      const newHeaderIndex = tableAST.rows.findIndex((_row, index) => !deletedRows.has(index))
+      if (newHeaderIndex > -1) {
+        changes.push({ from: rowLines[newHeaderIndex].to, insert: '\n' + delimiterLine.text })
+      }
+    }
+  } else {
+    // Grid table: A row is followed by a delimiter line, which goes with it
+    for (const index of indices) {
+      const line = rowLines[index]
+      // The row may start in a delimiter line, or the table is cut off
+      if (isGridTableDelimRow(line.text) || line.number >= doc.lines) {
+        continue
+      }
+      const nextLine = doc.line(line.number + 1)
+      changes.push({ from: line.from, to: Math.min(nextLine.to + 1, doc.length), insert: '' })
+    }
+  }
+
+  return changes
+}
+
+/**
  * Deletes an entire row from a table.
  *
  * @param   {EditorView}  target  The target EditorView
@@ -363,55 +457,13 @@ export function addRowBefore (target: EditorView): boolean {
  */
 export function deleteRow (target: EditorView): boolean {
   // Deleting a row is really boring: Simply replace the current line with nothing
-  const tr = mapSelectionsWithTables<TransactionSpec[]>(target, ctx => {
-    const idx = getRowIndicesByRanges(ctx.ranges, ctx.offsets.outer)
-    return idx.map(rowIdx => {
-      const line = target.state.doc.lineAt(ctx.tableAST.rows[rowIdx].from)
-      const isLastLine = line.number === target.state.doc.lines
-      if (ctx.tableAST.tableType === 'pipe') {
-        // Did the user select the divider? The second check is necessary as the
-        // regex also matches empty lines
-        if (isPipeTableDelimRow(line.text)) {
-          return undefined
-        }
-
-        const changes = [{
-          from: line.from, to: isLastLine ? line.to : line.to + 1, insert: ''
-        }]
-
-        if (rowIdx < ctx.tableAST.rows.length - 1) {
-          // Check if the user just deleted the header row. In that case, we
-          // need to swap the delim row with the next one.
-          const nextLine = target.state.doc.line(line.number + 1) // The delimiter would not be in the AST
-          if (isPipeTableDelimRow(nextLine.text)) {
-            const thirdLine = target.state.doc.line(line.number + 2)
-            changes.push(
-              { from: nextLine.from, to: nextLine.to + 1, insert: '' },
-              { from: thirdLine.to + 1, to: thirdLine.to + 1, insert: nextLine.text + '\n' }
-            )
-          }
-        }
-  
-        return { changes }
-      } else {
-        // Grid table
-        // The user may have the cursor in a divider or a content row
-        if (isGridTableDelimRow(line.text)) {
-          return undefined
-        }
-        const nextLine = target.state.doc.line(line.number + 1)
-        const isNextLineLastLine = nextLine.number === target.state.doc.lines
-        return {
-          changes: {
-            from: line.from, to: isNextLineLastLine ? nextLine.to : nextLine.to + 1, insert: ''
-          }
-        }
-      }
-    }).filter(i => i !== undefined)
+  const changes = mapSelectionsWithTables<ChangeSpec[]>(target, ctx => {
+    const rowIndices = getRowIndicesByRanges(ctx.ranges, ctx.offsets.outer)
+    return buildRowDeletionChanges(target.state, ctx.tableNode, ctx.tableAST, rowIndices)
   }).flat()
 
-  if (tr.length > 0) {
-    target.dispatch(...tr)
+  if (changes.length > 0) {
+    target.dispatch({ changes })
     return true
   } else {
     return false
