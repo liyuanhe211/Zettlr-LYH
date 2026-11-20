@@ -16,10 +16,10 @@
  * END HEADER
  */
 
-import { type RangeSet, type Range, type Extension } from '@codemirror/state'
-import { rangeInSelection } from '../util/range-in-selection'
+import { type RangeSet, type Range } from '@codemirror/state'
+import { shouldRevealSource, sourceRevealChanged } from '../util/reveal-selection'
 import { syntaxTree } from '@codemirror/language'
-import { Decoration, type DecorationSet, ViewPlugin, type ViewUpdate, EditorView, gutter, GutterMarker } from '@codemirror/view'
+import { Decoration, type DecorationSet, ViewPlugin, type ViewUpdate, type EditorView } from '@codemirror/view'
 
 function hideHeadingMarks (view: EditorView): RangeSet<Decoration> {
   const ranges: Array<Range<Decoration>> = []
@@ -29,15 +29,13 @@ function hideHeadingMarks (view: EditorView): RangeSet<Decoration> {
     syntaxTree(view.state).iterate({
       from, to,
       enter (node) {
-        // Headings must always show their syntax even if the cursor is only
-        // adjacent for a proper UX. If we didn't do that, users would have to
-        // click within this element to show the heading characters, which is
-        // undesirable.
-        if(rangeInSelection(view.state.selection, node.from, node.to, true)) {
+        // Global source editing preserves the heading's adjacent-cursor UX;
+        // exception mode requires an actual cursor within the heading.
+        if (shouldRevealSource(view.state, 'headings', node.from, node.to, true)) {
           return
         }
 
-        if (!node.name.startsWith('ATXHeading')) {
+        if (!node.name.startsWith('ATXHeading') && !node.name.startsWith('SetextHeading')) {
           return
         }
 
@@ -68,61 +66,10 @@ export const renderHeadings = ViewPlugin.fromClass(class {
   }
 
   update (update: ViewUpdate): void {
-    if (update.docChanged || update.viewportChanged || update.selectionSet) {
+    if (update.docChanged || update.viewportChanged || update.selectionSet || sourceRevealChanged(update)) {
       this.decorations = hideHeadingMarks(update.view)
     }
   }
 }, {
   decorations: v => v.decorations
 })
-
-// Second part of this file: Define a heading gutter.
-
-class HeadingMarkGutter extends GutterMarker {
-  constructor (private readonly level: number) {
-    super()
-  }
-
-  toDOM () {
-    const mark = document.createElement('div')
-    mark.textContent = `h${this.level}`
-    return mark
-  }
-}
-
-export const headingGutter: Extension[] = [
-  gutter({
-    class: 'cm-heading-gutter',
-    renderEmptyElements: false,
-    initialSpacer: () => new HeadingMarkGutter(1),
-    lineMarker (view, line, _otherMarkers) {
-      const node = syntaxTree(view.state).resolve(line.from, 1)
-      if (node.name !== 'HeaderMark') {
-        return null
-      }
-
-      const parent = node.parent
-      if (parent === null || !parent.name.startsWith('ATXHeading')) {
-        return null
-      }
-
-      const level = parseInt(parent.name.slice(10), 10)
-      if (Number.isNaN(level)) {
-        return null
-      }
-
-      return new HeadingMarkGutter(level)
-    }
-  }),
-  EditorView.baseTheme({
-    '.cm-heading-gutter .cm-gutterElement': {
-      display: 'flex',
-      alignItems: 'center'
-    },
-    '.cm-heading-gutter .cm-gutterElement div': {
-      fontFamily: 'monospace',
-      opacity: '0.3',
-      fontSize: '80%'
-    }
-  })
-]

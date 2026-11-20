@@ -25,7 +25,8 @@ import {
 import { syntaxTree } from '@codemirror/language'
 import { type SyntaxNodeRef } from '@lezer/common'
 import { StateField, type Range, type EditorState } from '@codemirror/state'
-import { rangeInSelection } from '../util/range-in-selection'
+import { shouldRevealSource, sourceRevealChanged } from '../util/reveal-selection'
+import type { CodeEditingCategory } from '../util/code-editing-policy'
 import { configField } from '../util/configuration'
 
 /**
@@ -67,7 +68,8 @@ function renderWidgets (
   state: EditorState,
   visibleRanges: ReadonlyArray<{ from: number, to: number }>,
   shouldHandleNode: (node: SyntaxNodeRef) => boolean,
-  createWidget: (state: EditorState, node: SyntaxNodeRef) => WidgetType|undefined
+  createWidget: (state: EditorState, node: SyntaxNodeRef) => WidgetType|undefined,
+  category: CodeEditingCategory
 ): DecorationSet {
   const widgets: Range<Decoration>[] = []
 
@@ -83,14 +85,14 @@ function renderWidgets (
       from,
       to,
       enter: (node) => {
-        // Determine the number of overlapping selections. If these are non-
-        // null, we must not render this widget
-        if (rangeInSelection(state.selection, node.from, node.to, includeAdjacent)) {
+        // Then, let the caller decide if they want to handle this node
+        if (!shouldHandleNode(node)) {
           return
         }
 
-        // Then, let the caller decide if they want to handle this node
-        if (!shouldHandleNode(node)) {
+        const attribute = category === 'images' ? node.node.nextSibling : null
+        const sourceTo = attribute?.name === 'PandocAttribute' && attribute.from === node.to ? attribute.to : node.to
+        if (shouldRevealSource(state, category, node.from, sourceTo, includeAdjacent)) {
           return
         }
 
@@ -148,18 +150,19 @@ function renderWidgets (
 export function renderInlineWidgets (
   shouldHandleNode: (node: SyntaxNodeRef) => boolean,
   createWidget: (state: EditorState, node: SyntaxNodeRef) => WidgetType|undefined,
-  shouldRebuild?: (update: ViewUpdate) => boolean
+  shouldRebuild?: (update: ViewUpdate) => boolean,
+  category: CodeEditingCategory = 'formatting'
 ) {
   const plugin = ViewPlugin.fromClass(class {
     decorations: DecorationSet
 
     constructor (view: EditorView) {
-      this.decorations = renderWidgets(view.state, view.visibleRanges, shouldHandleNode, createWidget)
+      this.decorations = renderWidgets(view.state, view.visibleRanges, shouldHandleNode, createWidget, category)
     }
 
     update (update: ViewUpdate): void {
-      if (update.docChanged || update.viewportChanged || update.selectionSet || shouldRebuild?.(update) === true) {
-        this.decorations = renderWidgets(update.view.state, update.view.visibleRanges, shouldHandleNode, createWidget)
+      if (update.docChanged || update.viewportChanged || update.selectionSet || sourceRevealChanged(update) || shouldRebuild?.(update) === true) {
+        this.decorations = renderWidgets(update.view.state, update.view.visibleRanges, shouldHandleNode, createWidget, category)
       }
     }
   }, {
@@ -189,14 +192,15 @@ export function renderInlineWidgets (
  */
 export function renderBlockWidgets (
   shouldHandleNode: (node: SyntaxNodeRef) => boolean,
-  createWidget: (state: EditorState, node: SyntaxNodeRef) => WidgetType|undefined
+  createWidget: (state: EditorState, node: SyntaxNodeRef) => WidgetType|undefined,
+  category: CodeEditingCategory = 'formatting'
 ): StateField<DecorationSet> {
   const pluginField = StateField.define<DecorationSet>({
     create (state: EditorState) {
-      return renderWidgets(state, [], shouldHandleNode, createWidget)
+      return renderWidgets(state, [], shouldHandleNode, createWidget, category)
     },
     update (oldDecoSet, transactions) {
-      return renderWidgets(transactions.state, [], shouldHandleNode, createWidget)
+      return renderWidgets(transactions.state, [], shouldHandleNode, createWidget, category)
     },
     provide: f => EditorView.decorations.from(f)
   })

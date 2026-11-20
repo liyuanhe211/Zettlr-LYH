@@ -53,7 +53,7 @@ class FormulaWidget extends WidgetType {
     const elem = document.createElement('span')
     elem.classList.add(DISPLAY_CLASSES[this.displayKind])
     elem.textContent = this.displayText
-    elem.addEventListener('click', clickAndSelect(view))
+    elem.addEventListener('click', clickAndSelect(view, 'calculatedFormulas', this.node))
     return elem
   }
 
@@ -92,7 +92,7 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): FormulaWidget|u
 }
 
 export const renderFormulas = [
-  renderInlineWidgets(shouldHandleNode, createWidget),
+  renderInlineWidgets(shouldHandleNode, createWidget, undefined, 'calculatedFormulas'),
   EditorView.baseTheme({
     '.formula-calculation-result': {
       color: 'rgb(44, 160, 44)', // matplotlib tab:green

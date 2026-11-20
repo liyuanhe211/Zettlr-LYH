@@ -77,7 +77,7 @@ class MermaidWidget extends WidgetType {
       .then(result => { elem.innerHTML = sanitizeHTML(result.svg) })
       .catch((err: unknown) => onError(err, elem))
 
-    elem.addEventListener('click', clickAndSelect(view))
+    elem.addEventListener('click', clickAndSelect(view, 'diagrams', this.node))
     return elem
   }
 
@@ -148,4 +148,4 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): MermaidWidget|u
   return new MermaidWidget(graph, node.node, window.config.get('darkMode') as boolean)
 }
 
-export const renderMermaid = renderBlockWidgets(shouldHandleNode, createWidget)
+export const renderMermaid = renderBlockWidgets(shouldHandleNode, createWidget, 'diagrams')

@@ -15,7 +15,7 @@
 import { type EditorView, type DecorationSet, ViewPlugin, type ViewUpdate, Decoration } from '@codemirror/view'
 import type { RangeSet, Range } from '@codemirror/state'
 import { syntaxTree } from '@codemirror/language'
-import { rangeInSelection } from '../util/range-in-selection'
+import { shouldRevealSource, sourceRevealChanged } from '../util/reveal-selection'
 import { configField } from '../util/configuration'
 
 function hideLinkMarkers (view: EditorView): RangeSet<Decoration> {
@@ -33,7 +33,7 @@ function hideLinkMarkers (view: EditorView): RangeSet<Decoration> {
         }
 
         // Do not hide any characters if a selection is inside here
-        if (rangeInSelection(view.state.selection, node.from, node.to, includeAdjacent)) {
+        if (shouldRevealSource(view.state, 'links', node.from, node.to, includeAdjacent)) {
           return false
         }
 
@@ -84,7 +84,7 @@ export const renderLinks = ViewPlugin.fromClass(class {
   }
 
   update (update: ViewUpdate): void {
-    if (update.docChanged || update.viewportChanged || update.selectionSet) {
+    if (update.docChanged || update.viewportChanged || update.selectionSet || sourceRevealChanged(update)) {
       this.decorations = hideLinkMarkers(update.view)
     }
   }

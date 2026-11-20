@@ -14,6 +14,9 @@
  */
 
 import { type EditorView } from '@codemirror/view'
+import type { CodeEditingCategory } from '../util/code-editing-policy'
+import { sourceEditingAllowed } from '../util/reveal-selection'
+import { configField } from '../util/configuration'
 
 /**
  * A helper function that returns a click-callback that can be used to set a
@@ -24,10 +27,27 @@ import { type EditorView } from '@codemirror/view'
  *
  * @return  {Function}           A callback compatible with mouse events
  */
-export default function clickAndSelect (view: EditorView): (event: MouseEvent) => void {
+export default function clickAndSelect (
+  view: EditorView,
+  category?: CodeEditingCategory,
+  sourceRange?: { from: number, to: number }
+): (event: MouseEvent) => void {
   return function (event: MouseEvent) {
+    if (category !== undefined && !sourceEditingAllowed(view.state, category)) {
+      return
+    }
     const { target } = event
     if (!(target instanceof HTMLElement)) {
+      return
+    }
+
+    if (category !== undefined && sourceRange !== undefined &&
+      view.state.field(configField, false)?.editCodeWhenClicked === false) {
+      // Exception mode requires an interior cursor. A full widget selection
+      // would put its head just outside the source range and leave it rendered.
+      event.stopPropagation()
+      event.preventDefault()
+      view.dispatch({ selection: { anchor: Math.min(sourceRange.from + 1, sourceRange.to - 1) } })
       return
     }
 

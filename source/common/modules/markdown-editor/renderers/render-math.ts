@@ -20,7 +20,7 @@ import { type EditorState } from '@codemirror/state'
 import clickAndSelect from './click-and-select'
 import { equationMenu } from '../context-menu/equation-menu'
 import { katexToElem } from 'source/common/util/mathtex-to-html'
-import { rangeInSelection } from '../util/range-in-selection'
+import { shouldRevealSource } from '../util/reveal-selection'
 import { configField } from '../util/configuration'
 
 class MathWidget extends WidgetType {
@@ -39,7 +39,7 @@ class MathWidget extends WidgetType {
     elem.classList.add('preview-math')
     elem.dataset.equation = this.equation
     katexToElem(this.equation, elem, this.displayMode)
-    elem.addEventListener('click', clickAndSelect(view))
+    elem.addEventListener('click', clickAndSelect(view, 'math', this.node))
     elem.addEventListener('contextmenu', (event) => {
       equationMenu(view, this.equation, { x: event.clientX, y: event.clientY })
     })
@@ -92,7 +92,7 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): MathWidget|unde
   const includeAdjacent = state.field(configField, false)?.previewModeShowSyntaxWhenCursorIsAdjacent ?? true
 
   // Don't render if the selection is within the node
-  if (rangeInSelection(state.selection, node.from, node.to, includeAdjacent)) {
+  if (shouldRevealSource(state, 'math', node.from, node.to, includeAdjacent)) {
     return undefined
   }
 
@@ -107,7 +107,7 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): MathWidget|unde
 }
 
 export const renderMath = [
-  renderBlockWidgets(shouldHandleNode, createWidget),
+  renderBlockWidgets(shouldHandleNode, createWidget, 'math'),
   EditorView.baseTheme({
     // KaTeX overrides
     '.katex': {
