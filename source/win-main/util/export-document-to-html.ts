@@ -15,7 +15,9 @@
  *                  here: the Markdown-to-HTML conversion with citations,
  *                  Mermaid charts rendered to SVG, the KaTeX stylesheet with
  *                  its fonts embedded, and the colors and fonts of the editor
- *                  theme that is currently active.
+ *                  theme that is currently active. Tracked changes become
+ *                  <ins> and <del> elements while Show Revisions is on and
+ *                  are accepted while it is off.
  *
  * END HEADER
  */
@@ -26,11 +28,14 @@ import { md2html } from '@common/modules/markdown-utils'
 import {
   applyCodeHighlighting,
   buildStandaloneHTMLDocument,
+  convertRevisionSpans,
   convertSoftLineBreaks,
   enableTaskCheckboxes,
   highlightFencedCodeBlocks,
   markBracketLinkMarks,
   markImageOnlyParagraphs,
+  applyImageSizeAttributes,
+  prepareRevisionsForHTMLExport,
   type EditorThemeVariables
 } from '@common/modules/markdown-utils/standalone-html-export'
 import { defaultVarsDark, defaultVarsLight } from '@common/modules/markdown-editor/theme/editor'
@@ -93,6 +98,32 @@ function readEditorThemeVariables (): { variables: EditorThemeVariables, darkMod
   }
 
   return { variables, darkMode }
+}
+
+/**
+ * Reads the width of the main editor's text column, without the padding of the
+ * content element and of its lines, so that the export opens with the line
+ * length the user currently sees. Returns undefined when no editor is laid out.
+ */
+function readEditorContentWidth (): number|undefined {
+  const content = document.querySelector<HTMLElement>('.main-editor-wrapper .cm-editor .cm-content') ??
+    document.querySelector<HTMLElement>('.cm-editor .cm-content')
+  if (content === null) {
+    return undefined
+  }
+
+  const horizontalPadding = (element: Element): number => {
+    const style = getComputedStyle(element)
+    return (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0)
+  }
+
+  let width = content.clientWidth - horizontalPadding(content)
+  const line = content.querySelector('.cm-line')
+  if (line !== null) {
+    width -= horizontalPadding(line)
+  }
+
+  return Number.isFinite(width) && width > 0 ? width : undefined
 }
 
 /**
@@ -221,8 +252,13 @@ export async function exportDocumentToHTML (filePath: string): Promise<{ path: s
     ? frontmatter.title.trim()
     : pathBasename(filePath, pathExtname(filePath))
 
+  // Tracked changes (spec C10, export item 2): shown as <ins> and <del> with
+  // Show Revisions on, accepted with Show Revisions off
+  const showRevisions = window.config.get('display.showRevisions') !== false
+  const { markdown, revisions } = prepareRevisionsForHTMLExport(contents, showRevisions)
+
   const zknLinkFormat: 'link|title'|'title|link' = window.config.get('zkn.linkFormat') ?? 'link|title'
-  const rawHTML = await md2html(contents, {
+  const rawHTML = await md2html(markdown, {
     referenceSectionTitle: trans('References'),
     onCitation: window.getCitationCallback(library),
     onBibliography: async (citations) => {
@@ -240,10 +276,12 @@ export async function exportDocumentToHTML (filePath: string): Promise<{ path: s
 
   // DOMParser yields an inert document: nothing is loaded or executed here.
   const parsed = new DOMParser().parseFromString(`<body>${cleanHTML}</body>`, 'text/html')
-  applyCodeHighlighting(parsed, highlightFencedCodeBlocks(contents, { zknLinkParserConfig: { format: zknLinkFormat } }))
+  convertRevisionSpans(parsed, revisions)
+  applyCodeHighlighting(parsed, highlightFencedCodeBlocks(markdown, { zknLinkParserConfig: { format: zknLinkFormat } }))
   await renderMermaidCharts(parsed)
   convertSoftLineBreaks(parsed)
   markImageOnlyParagraphs(parsed)
+  applyImageSizeAttributes(parsed)
   markBracketLinkMarks(parsed)
   enableTaskCheckboxes(parsed)
   const bodyHTML = parsed.body.innerHTML
@@ -259,9 +297,8 @@ export async function exportDocumentToHTML (filePath: string): Promise<{ path: s
     bodyHTML,
     themeVariables: variables,
     darkMode,
-    imageMaxWidthPercent: Number(window.config.get('display.imageWidth') ?? 100),
-    imageMaxHeightPercent: Number(window.config.get('display.imageHeight') ?? 50),
-    extraStylesheets
+    extraStylesheets,
+    contentWidthPx: readEditorContentWidth()
   })
 
   const result: { path: string, opened: boolean }|false = await ipcRenderer.invoke('application', {

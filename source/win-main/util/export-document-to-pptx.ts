@@ -86,9 +86,11 @@ export async function exportDocumentToPptx (filePath: string): Promise<void> {
     } as DocumentManagerIPCAPI)
 
     if (Array.isArray(modifiedPaths) && modifiedPaths.includes(filePath)) {
+      // Zettlr-LYH scratch notes (R40): a scratch note is only written back to
+      // its scratch file here, without asking for a location
       const saved: unknown = await ipcRenderer.invoke('documents-provider', {
         command: 'save-file',
-        payload: { path: filePath }
+        payload: { path: filePath, flushScratchOnly: true }
       } as DocumentManagerIPCAPI)
 
       if (saved !== true) {
