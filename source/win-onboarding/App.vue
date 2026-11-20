@@ -164,7 +164,7 @@ if (configStore.config.window.vibrancy && process.platform === 'darwin') {
   document.body.classList.add('has-vibrancy')
 }
 
-const pages = [
+const allPages = [
   'welcome',
   'app-lang',
   'updates',
@@ -175,6 +175,14 @@ const pages = [
   'other-files',
   'finish'
 ] as const
+
+// Zettlr-LYH requirement R95: when updates are disabled at build time
+// (__UPDATES_DISABLED__ is fixed to '1'), the 'updates' page is left out so
+// that users are not asked to tick an option that has no effect.
+type OnboardingPage = typeof allPages[number]
+const pages: readonly OnboardingPage[] = allPages.filter(page => {
+  return page !== 'updates' || __UPDATES_DISABLED__ === '0'
+})
 
 // Update labels
 const updateCompleteHeading = trans('Update complete!')
