@@ -63,6 +63,10 @@ _Claude_tmp/
 # User-provided screenshots (may contain personal desktop information)
 User_Provided_Screenshots/
 
+# YaHei Consolas Hybrid font: its Microsoft license does not allow redistribution,
+# so the file stays local (the app falls back to an installed copy)
+static/fonts/YaHei.Consolas.1.12.ttf
+
 # ==== Missing standard entries added (standard template of Initialize_Project_Gitignore.py) ====
 
 # Sensitive / private files, second line of defense (case-insensitive, any position)
@@ -75,6 +79,7 @@ User_Provided_Screenshots/
 
 # Local Claude collaboration instructions and project settings
 CLAUDE.md
+.claude/
 
 # Local Codex instruction files and settings
 AGENTS.md
