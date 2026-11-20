@@ -87,6 +87,41 @@ const UNWRAPPABLE_NODES = [
 const PAGE_GLUE_NODES = [ 'CommentBlock', 'HorizontalRule' ]
 
 /**
+ * Matches a complete brace block at the start of a text (balanced braces on
+ * one line), e.g. `{width=50%}` at the start of `{width=50%} more text`
+ */
+const LEADING_BRACE_BLOCK = /^\{[^{}\n]*\}/
+
+/**
+ * A range of the document
+ */
+interface SourceRange {
+  from: number
+  to: number
+}
+
+/**
+ * Returns the range of a complete brace block that starts exactly at a
+ * position and ends on the same line, or null. Used where the syntax tree has
+ * no PandocAttribute node for braces that directly follow an image (for
+ * example while the document is only partially parsed), so that the existing
+ * block is rewritten instead of a second one being inserted (R106).
+ *
+ * @param   {EditorState}       state     The editor state
+ * @param   {number}            position  Where the block must start
+ *
+ * @return  {SourceRange|null}            The range including both braces, or
+ *                                        null if no complete block starts there
+ */
+export function findLeadingBraceBlock (state: EditorState, position: number): SourceRange|null {
+  if (position < 0 || position > state.doc.length) {
+    return null
+  }
+  const braces = LEADING_BRACE_BLOCK.exec(state.sliceDoc(position, state.doc.lineAt(position).to))
+  return braces === null ? null : { from: position, to: position + braces[0].length }
+}
+
+/**
  * Returns the syntax tree, parsing the whole document if necessary
  */
 function getTree (state: EditorState): Tree {
@@ -136,7 +171,7 @@ function findNodeAt (tree: Tree, from: number, to: number, predicate: (node: Syn
 /**
  * The text between the braces of a PandocAttribute node
  */
-function braceInner (state: EditorState, attribute: SyntaxNode): string {
+function braceInner (state: EditorState, attribute: SourceRange): string {
   return state.sliceDoc(attribute.from + 1, attribute.to - 1)
 }
 
@@ -378,12 +413,13 @@ export function findPandocAttributeTargets (state: EditorState, from: number, to
 // ---------------------------------------------------------------------------
 
 /**
- * Builds the changes for an existing brace attribute node. Returns undefined
- * when no key remains, so that the caller can remove the braces its own way.
+ * Builds the changes for an existing brace attribute block (a PandocAttribute
+ * node or the range of braces found in the text). Returns undefined when no
+ * key remains, so that the caller can remove the braces its own way.
  */
 function rewriteBraces (
   state: EditorState,
-  attribute: SyntaxNode,
+  attribute: SourceRange,
   kind: PandocAttributeTargetKind,
   update: PandocAttributeUpdate
 ): ChangeSpec[]|undefined {
@@ -433,12 +469,21 @@ function buildSpanChanges (state: EditorState, tree: Tree, target: PandocAttribu
   return [{ from: marks[0].from, to: marks[0].to }, { from: marks[marks.length - 1].from, to: attribute.to }]
 }
 
+/**
+ * Builds the changes for an image. The tree comes from getTree, which already
+ * parses the whole document (within its time limit). If the tree still has no
+ * PandocAttribute node after the image, a complete brace block directly after
+ * the image counts as its attribute block and is rewritten in place; new
+ * braces are only inserted when there is none, so that no second block
+ * appears (R106).
+ */
 function buildImageChanges (state: EditorState, tree: Tree, target: PandocAttributeTarget, update: PandocAttributeUpdate): ChangeSpec[] {
   const found = findImage(tree, target.from)
   if (found === undefined || found.image.from !== target.from) {
     return []
   }
-  const { image, attribute } = found
+  const { image } = found
+  const attribute: SourceRange|null = found.attribute ?? findLeadingBraceBlock(state, image.to)
   if (attribute === null) {
     const core = newBraceCore('image', update)
     return core === undefined ? [] : [{ from: image.to, insert: `{${core}}` }]

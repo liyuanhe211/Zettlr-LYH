@@ -134,12 +134,20 @@ export function parseChildren<T extends { children: ASTNode[] } & MDNode> (astNo
     }
 
     if (currentChild.name === 'PandocAttribute') {
-      // PandocAttribute nodes should never show up in the tree
-      // TODO: This assumes that the PandocAttribute should apply to the parent
-      // node, but often (e.g., for images) they belong to the previous child!
-      // TODO: Check what the *previous* child was, and if it can have attributes
+      // PandocAttribute nodes never show up in the tree. An attribute block
+      // written directly after an image or a link, without any space, belongs
+      // to that image or link (`![a](a.png){width=50%}`); every other
+      // attribute block applies to the parent node (e.g. `# Heading {#id}`).
       // Docs: https://pandoc.org/MANUAL.html#extension-attributes
-      astNode.attributes = parseAttributeNode(astNode.attributes, currentChild, markdown)
+      const previousChild = astNode.children.at(-1)
+      const attachesToPrevious = previousChild !== undefined &&
+        (previousChild.type === 'Image' || previousChild.type === 'Link') &&
+        previousChild.to === currentChild.from
+      if (attachesToPrevious) {
+        previousChild.attributes = parseAttributeNode(previousChild.attributes, currentChild, markdown)
+      } else {
+        astNode.attributes = parseAttributeNode(astNode.attributes, currentChild, markdown)
+      }
     } else {
       astNode.children.push(parseNode(currentChild, markdown))
     }

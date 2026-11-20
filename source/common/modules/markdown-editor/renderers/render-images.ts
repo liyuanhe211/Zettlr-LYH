@@ -15,13 +15,15 @@
  * END HEADER
  */
 
-import { renderInlineWidgets } from './base-renderer'
 import { type SyntaxNode, type SyntaxNodeRef } from '@lezer/common'
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
-import { Prec, type EditorState } from '@codemirror/state'
+import { Prec, type EditorState, type Range } from '@codemirror/state'
 import { configField } from '../util/configuration'
+import { shouldRevealSource, sourceEditingAllowed, sourceRevealChanged } from '../util/reveal-selection'
+import { clearPastedImagePreviewEffect, hasPastedImagePreview, pastedImagePreviewField, pastedImagePreviewLifecycle } from '../util/pasted-image-preview'
 import { findImageOnlyLines, isRenderableImageNode } from '../util/image-only-lines'
 import {
+  buildImageCaptionChanges,
   buildImageWidthChanges,
   computeResizedWidthPercent,
   findHiddenImageAttributeRanges,
@@ -30,7 +32,7 @@ import {
   selectImageEffect,
   selectedImageField
 } from '../util/image-selection'
-import makeValidUri from '@common/util/make-valid-uri'
+import tryMakeValidUri from '@common/util/try-make-valid-uri'
 import { linkImageMenu } from '../context-menu/link-image-menu'
 import { trans } from '@common/i18n-renderer'
 import { pathDirname } from '@common/util/renderer-path-polyfill'
@@ -57,17 +59,42 @@ function isDataUrl (url: string): boolean {
  */
 const IMAGE_HEIGHT_CACHE = new Map<string, number>()
 
+// Key cleanup by DOM rather than widget instance: updateDOM can reuse a figure
+// for a new widget when its selection or attributes change.
+const IMAGE_RESIZE_OBSERVERS = new WeakMap<HTMLElement, ResizeObserver>()
+
+/** Fits automatic previews to the viewport and their original device pixels. */
+function applyAutomaticSizeLimits (img: HTMLImageElement, visibleHeight: number): boolean {
+  // CSS pixels include Windows display scaling and the current browser zoom.
+  const pixelRatio = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+    ? window.devicePixelRatio : 1
+  const availableHeight = visibleHeight > 0 ? Math.floor(visibleHeight * 0.8) : Infinity
+  const originalHeight = img.naturalHeight > 0 ? Math.floor(img.naturalHeight * 1000 / pixelRatio) / 1000 : Infinity
+  const heightLimit = Math.min(availableHeight, originalHeight)
+  const maxHeight = Number.isFinite(heightLimit) ? `${heightLimit}px` : ''
+  const maxWidth = img.naturalWidth > 0 ? `min(100%, ${Math.floor(img.naturalWidth * 1000 / pixelRatio) / 1000}px)` : '100%'
+  if (img.style.maxHeight === maxHeight && img.style.maxWidth === maxWidth) {
+    return false
+  }
+  img.style.maxHeight = maxHeight
+  img.style.maxWidth = maxWidth
+  return true
+}
+
 /**
  * Resolves the actual image URL to load, provided the current file's location.
  *
  * @param   {string}  filePath  The file path
  * @param   {string}  imageUrl  The image URL
  *
- * @return  {string}            The full, absolute path to the image.
+ * @return  {string|null}       The full, absolute path to the image (data URLs
+ *                               unchanged), or null if the image URL cannot be
+ *                               turned into a valid URI (e.g. `https://`). A
+ *                               null result means the image is not rendered.
  */
-export function resolveImageUrl (filePath: string, imageUrl: string): string {
+export function resolveImageUrl (filePath: string, imageUrl: string): string | null {
   const basePath = pathDirname(filePath)
-  return isDataUrl(imageUrl) ? imageUrl : makeValidUri(imageUrl, basePath)
+  return isDataUrl(imageUrl) ? imageUrl : tryMakeValidUri(imageUrl, basePath)
 }
 
 /**
@@ -112,8 +139,9 @@ function applyExplicitWidthStyles (figure: HTMLElement, img: HTMLImageElement, w
  * Applies the size styles of an image according to its Pandoc attributes.
  * With a width, the image takes that share of the text column. Without one,
  * the image is shown at its natural size, and an image wider than the text
- * column is scaled down to exactly the full width of the column, keeping its
- * aspect ratio. The maximum image preview width and height from the
+ * column is scaled down to fit it. Without either size attribute, the image
+ * also fits within 80% of the editor's visible height, keeping its aspect
+ * ratio and never enlarging small images. The maximum preview sizes from the
  * preferences (`display.imageWidth` and `display.imageHeight`) do not apply to
  * the editor preview. The recognized width is remembered on the figure
  * (`data-image-width`) for the size label.
@@ -121,11 +149,13 @@ function applyExplicitWidthStyles (figure: HTMLElement, img: HTMLImageElement, w
  * @param   {HTMLElement}       figure      The figure element of the widget
  * @param   {HTMLImageElement}  img         The image element of the widget
  * @param   {Record}            properties  The key-value attributes, if any
+ * @param   {EditorView}        view        The editor containing the preview
  */
 function applySizeStyles (
   figure: HTMLElement,
   img: HTMLImageElement,
-  properties: Record<string, string>|undefined
+  properties: Record<string, string>|undefined,
+  view: EditorView
 ): void {
   const width = normalizeSize(properties?.width ?? properties?.w)
   const height = normalizeSize(properties?.height ?? properties?.h)
@@ -136,21 +166,25 @@ function applySizeStyles (
     return
   }
 
-  // Without an explicit width, the image keeps its natural size, and the
-  // maximum width of 100% scales a wider image down to the full width of the
-  // text column. The height stays automatic, so the aspect ratio is kept.
-  // Only an explicit height limits the height.
+  // Attribute presence matters even when normalizeSize cannot interpret its
+  // value: explicit attributes keep their existing preview rules.
+  const automaticSize = properties?.width === undefined && properties?.w === undefined &&
+    properties?.height === undefined && properties?.h === undefined
   const maxHeight = height ?? ''
 
   figure.style.width = ''
   figure.style.maxWidth = '100%'
   figure.style.maxHeight = maxHeight
-  // We need to apply the same max width/height styles to the image as to the
-  // figure. Otherwise the image will be cropped.
-  img.style.width = ''
-  img.style.height = ''
+  img.style.width = automaticSize ? 'auto' : ''
+  img.style.height = automaticSize ? 'auto' : ''
   img.style.maxWidth = '100%'
   img.style.maxHeight = maxHeight
+  if (automaticSize) {
+    // Constrain only the replaced element; limiting its figure separately
+    // could clip it instead of letting the image preserve its aspect ratio.
+    figure.style.maxHeight = ''
+    applyAutomaticSizeLimits(img, view.scrollDOM.clientHeight)
+  }
 }
 
 /**
@@ -203,11 +237,15 @@ function imagePositionOf (view: EditorView, figure: HTMLElement): number|undefin
  */
 function selectImageSource (view: EditorView, imageFrom: number): boolean {
   const range = imageSourceRange(view.state, imageFrom)
-  if (range === undefined) {
+  if (range === undefined || !sourceEditingAllowed(view.state, 'images')) {
     return false
   }
 
-  view.dispatch({ selection: { anchor: range.from, head: range.to }, effects: selectImageEffect.of(null) })
+  const configuration = view.state.field(configField, false)
+  const selection = configuration !== undefined && !configuration.editCodeWhenClicked
+    ? { anchor: range.from + 1 }
+    : { anchor: range.from, head: range.to }
+  view.dispatch({ selection, effects: selectImageEffect.of(null) })
   view.focus()
   return true
 }
@@ -418,7 +456,7 @@ class ImageWidget extends WidgetType {
     img.draggable = false
 
     // Retrieve and apply the size constraints
-    applySizeStyles(figure, img, this.data.properties)
+    applySizeStyles(figure, img, this.data.properties, view)
 
     // Store some crucial information on the node itself
     img.dataset.from = String(this.node.from)
@@ -487,6 +525,9 @@ class ImageWidget extends WidgetType {
 
     // Update the image title on load to retrieve the real image size.
     img.onload = () => {
+      if (img.style.width === 'auto' && img.style.height === 'auto') {
+        applyAutomaticSizeLimits(img, view.scrollDOM.clientHeight)
+      }
       img.title = `${img.dataset.title!.replace(/\\"/g, '"')} (${img.naturalWidth}x${img.naturalHeight}px)`
       updateSizeLabel(img, size, figure.dataset.imageWidth ?? '')
 
@@ -507,28 +548,34 @@ class ImageWidget extends WidgetType {
     caption.textContent = this.imageTitle.replace(/\\"/g, '"') // Un-escape title
     caption.contentEditable = 'true'
 
-    // Define a quick inline function that takes care of applying a new caption
+    // Applies an edited caption on Enter and when the caption loses focus. The
+    // image is located in the current document at the time of the event (the
+    // positions stored on the element can be outdated, since the widget may be
+    // reused without an update), and an unchanged caption changes nothing.
+    // Only the image source itself is rewritten; the attributes after it stay.
+    // A second event after the change (e.g. focusout after Enter) finds the
+    // new caption in the document and does nothing either.
     const updateCaptionFunction = function (event: KeyboardEvent | FocusEvent): void {
       if (event instanceof KeyboardEvent && event.key !== 'Enter') {
         // If this is a KeyboardEvent, only perform the action on Enter
         return
       }
 
-      const { from, to, attributes, originalUrl } = img.dataset
-      const nodeFrom = parseInt(from ?? '-1', 10)
-      const nodeTo = parseInt(to ?? '-1', 10)
-
+      // Enter must not insert a line break into the caption
       event.preventDefault()
       event.stopPropagation()
-      // Escape quotes to prevent breaking of the image
-      const newCaption = caption.textContent?.replace(/"/g, '\\"') ?? ''
-      // "Why are you setting the caption both as the image description and title?"
-      // Well, since all exports sometimes use this, sometimes the other value.
-      const newImageTag = `![${newCaption}](${originalUrl} "${newCaption}")${attributes ?? ''}`
-      // Remove the event listeners beforehand to prevent multiple dispatches
-      caption.removeEventListener('keydown', updateCaptionFunction)
-      caption.removeEventListener('focusout', updateCaptionFunction)
-      view.dispatch({ changes: { from: nodeFrom, to: nodeTo, insert: newImageTag } })
+
+      const imageFrom = imagePositionOf(view, figure)
+      if (imageFrom === undefined) {
+        return
+      }
+
+      const changes = buildImageCaptionChanges(view.state, imageFrom, caption.textContent ?? '')
+      if (changes.length === 0) {
+        return
+      }
+
+      view.dispatch({ changes })
     }
 
     // Should work on these events
@@ -547,6 +594,9 @@ class ImageWidget extends WidgetType {
         view.state.field(configField).metadata.path,
         img.dataset.originalUrl ?? ''
       )
+      if (url === null) {
+        return // An image URL that cannot be resolved opens nothing
+      }
 
       // Open in Zettlr if wanted. TODO: Maybe move this into the editor config?
       if (window.config.get('files.images.openWith') === 'zettlr') {
@@ -589,7 +639,24 @@ class ImageWidget extends WidgetType {
     figure.appendChild(leftHandle)
     figure.appendChild(rightHandle)
 
-    img.src = resolveImageUrl(view.state.field(configField).metadata.path, this.imageUrl)
+    const resizeObserver = new ResizeObserver(() => {
+      // Explicit sizing (including a live handle drag) replaces these auto
+      // styles. Inspect the reused DOM, not this widget's original attributes.
+      if (img.style.width === 'auto' && img.style.height === 'auto' &&
+        applyAutomaticSizeLimits(img, view.scrollDOM.clientHeight)) {
+        refreshOverlays()
+        view.requestMeasure()
+      }
+    })
+    // Observe only the viewport, never the image whose size we change. Width
+    // constraints respond through CSS; unchanged size limits do no work.
+    resizeObserver.observe(view.scrollDOM)
+    IMAGE_RESIZE_OBSERVERS.set(figure, resizeObserver)
+
+    const resolvedSource = resolveImageUrl(view.state.field(configField).metadata.path, this.imageUrl)
+    if (resolvedSource !== null) {
+      img.src = resolvedSource
+    }
 
     return figure
   }
@@ -618,12 +685,12 @@ class ImageWidget extends WidgetType {
 
       // Then, the selection state and the size
       dom.classList.toggle('selected', this.selected)
-      applySizeStyles(dom, img, this.data.properties)
+      applySizeStyles(dom, img, this.data.properties, view)
       updateSizeLabel(img, size, dom.dataset.imageWidth ?? '')
 
       const resolvedURL = resolveImageUrl(view.state.field(configField).metadata.path, this.imageUrl)
 
-      if (resolvedURL !== img.src) {
+      if (resolvedURL !== null && resolvedURL !== img.src) {
         // The load and onerror handlers will handle this accordingly (and also
         // update the size and title)
         img.src = resolvedURL
@@ -636,6 +703,16 @@ class ImageWidget extends WidgetType {
   }
 
   ignoreEvent (event: Event): boolean { return true }
+
+  destroy (dom: HTMLElement): void {
+    IMAGE_RESIZE_OBSERVERS.get(dom)?.disconnect()
+    IMAGE_RESIZE_OBSERVERS.delete(dom)
+    const img = dom.querySelector('img')
+    if (img !== null) {
+      img.onload = null
+      img.onerror = null
+    }
+  }
 }
 
 function shouldHandleNode (node: SyntaxNodeRef): boolean {
@@ -672,6 +749,9 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): ImageWidget | u
   }
 
   const resolvedImageSrc = resolveImageUrl(state.field(configField).metadata.path, url)
+  if (resolvedImageSrc === null) {
+    return undefined // Leave an image whose URL cannot be resolved as text
+  }
   const selected = state.field(selectedImageField, false) === node.from
   return new ImageWidget(node.node, title, url, resolvedImageSrc, alt, data, selected)
 }
@@ -684,8 +764,39 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): ImageWidget | u
  * @return  {boolean}             True if the selected image changed
  */
 function selectedImageChanged (update: ViewUpdate): boolean {
-  return update.startState.field(selectedImageField, false) !== update.state.field(selectedImageField, false)
+  return update.startState.field(selectedImageField, false) !== update.state.field(selectedImageField, false) ||
+    update.startState.field(pastedImagePreviewField, false) !== update.state.field(pastedImagePreviewField, false)
 }
+
+/** Keep the one-paste exception local to images; all other nodes use the shared policy. */
+function decorateImages (view: EditorView): DecorationSet {
+  const widgets: Array<Range<Decoration>> = []
+  const includeAdjacent = view.state.field(configField, false)?.previewModeShowSyntaxWhenCursorIsAdjacent ?? true
+  for (const { from, to } of view.visibleRanges) {
+    syntaxTree(view.state).iterate({ from, to, enter (node) {
+      if (!shouldHandleNode(node)) return
+      const attribute = node.node.nextSibling
+      const sourceTo = attribute?.name === 'PandocAttribute' && attribute.from === node.to ? attribute.to : node.to
+      if (!hasPastedImagePreview(view.state, node.from, sourceTo) &&
+        shouldRevealSource(view.state, 'images', node.from, sourceTo, includeAdjacent)) return
+      const widget = createWidget(view.state, node)
+      if (widget !== undefined) {
+        widgets.push(Decoration.replace({ widget, inclusive: false }).range(node.from, node.to))
+      }
+    } })
+  }
+  return Decoration.set(widgets, true)
+}
+
+const imageWidgets = ViewPlugin.fromClass(class {
+  decorations: DecorationSet
+  constructor (view: EditorView) { this.decorations = decorateImages(view) }
+  update (update: ViewUpdate): void {
+    if (update.docChanged || update.viewportChanged || update.selectionSet || sourceRevealChanged(update) || selectedImageChanged(update)) {
+      this.decorations = decorateImages(update.view)
+    }
+  }
+}, { decorations: plugin => plugin.decorations })
 
 const imageOnlyLineDecoration = Decoration.line({ class: 'cm-image-only-line' })
 
@@ -699,6 +810,31 @@ const imageOnlyLineDecoration = Decoration.line({ class: 'cm-image-only-line' })
 function decorateImageOnlyLines (view: EditorView): DecorationSet {
   const includeAdjacent = view.state.field(configField, false)?.previewModeShowSyntaxWhenCursorIsAdjacent ?? true
   const lineStarts = findImageOnlyLines(view.state, view.visibleRanges, includeAdjacent)
+  // The shared utility follows normal source policy. Include freshly pasted
+  // image-only lines while their local preview exception is active as well.
+  for (const range of view.state.field(pastedImagePreviewField, false) ?? []) {
+    for (let position = range.from; position <= range.to;) {
+      const line = view.state.doc.lineAt(position)
+      if (line.text.trim() !== '') {
+        let covered = line.from
+        let imageCount = 0
+        syntaxTree(view.state).iterate({ from: line.from, to: line.to, enter (node) {
+          if (!shouldHandleNode(node) || !isRenderableImageNode(view.state, node) ||
+            !hasPastedImagePreview(view.state, node.from, node.to)) return
+          if (view.state.sliceDoc(covered, node.from).trim() === '') {
+            covered = node.to
+            imageCount++
+          }
+        } })
+        if (imageCount > 0 && view.state.sliceDoc(covered, line.to).trim() === '' && !lineStarts.includes(line.from)) {
+          lineStarts.push(line.from)
+        }
+      }
+      if (line.to >= range.to) break
+      position = line.to + 1
+    }
+  }
+  lineStarts.sort((first, second) => first - second)
   return Decoration.set(lineStarts.map(lineStart => imageOnlyLineDecoration.range(lineStart)))
 }
 
@@ -710,7 +846,7 @@ const imageOnlyLines = ViewPlugin.fromClass(class {
   }
 
   update (update: ViewUpdate): void {
-    if (update.docChanged || update.viewportChanged || update.selectionSet) {
+    if (update.docChanged || update.viewportChanged || update.selectionSet || sourceRevealChanged(update) || selectedImageChanged(update)) {
       this.decorations = decorateImageOnlyLines(update.view)
     }
   }
@@ -742,7 +878,7 @@ const hiddenImageAttributes = ViewPlugin.fromClass(class {
   }
 
   update (update: ViewUpdate): void {
-    if (update.docChanged || update.viewportChanged || update.selectionSet) {
+    if (update.docChanged || update.viewportChanged || update.selectionSet || sourceRevealChanged(update)) {
       this.decorations = hideImageAttributes(update.view)
     }
   }
@@ -763,6 +899,9 @@ function clearImageSelection (view: EditorView): void {
  */
 const imageSelectionHandlers = Prec.highest(EditorView.domEventHandlers({
   mousedown (event, view) {
+    if ((view.state.field(pastedImagePreviewField, false)?.length ?? 0) > 0) {
+      view.dispatch({ effects: clearPastedImagePreviewEffect.of(null) })
+    }
     // A click anywhere else in the editor ends the selection; the click itself
     // proceeds as usual
     const selected = view.state.field(selectedImageField, false)
@@ -846,7 +985,12 @@ export const renderImages = [
         transition: '0.2s opacity ease',
         backgroundColor: 'rgba(0, 0, 0, .7)',
         color: 'white',
-        fontSize: '12px',
+        // The size follows the editor's base font size (a custom property set
+        // on the editor wrapper) instead of `em`: an image can sit on a
+        // heading line, whose own font-size is a multiple such as 2em, and an
+        // `em` value would be multiplied by that again. The fallback equals
+        // the previous fixed size of 12px.
+        fontSize: 'calc(var(--editor-base-font-size, 18px) * 0.667)',
         borderRadius: '6px',
         padding: '10px',
         // If we have images in a list, they will inherit the textIndent applied
@@ -905,7 +1049,9 @@ export const renderImages = [
     }
   }),
   selectedImageField,
-  renderInlineWidgets(shouldHandleNode, createWidget, selectedImageChanged),
+  pastedImagePreviewField,
+  pastedImagePreviewLifecycle,
+  imageWidgets,
   imageOnlyLines,
   hiddenImageAttributes,
   imageSelectionHandlers

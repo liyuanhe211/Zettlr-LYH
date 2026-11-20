@@ -4,7 +4,8 @@
  *
  * Contains:        selectImageEffect, selectedImageField, findImageAt,
  *                  imageSourceRange, buildImageWidthChanges,
- *                  computeResizedWidthPercent, findHiddenImageAttributeRanges
+ *                  buildImageCaptionChanges, computeResizedWidthPercent,
+ *                  findHiddenImageAttributeRanges
  * CVM-Role:        Utility Function
  * License:         GNU GPL v3
  *
@@ -19,14 +20,26 @@
  * END HEADER
  */
 
-import { syntaxTree } from '@codemirror/language'
+import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
 import { StateEffect, StateField, type ChangeSpec, type EditorState } from '@codemirror/state'
-import type { SyntaxNode } from '@lezer/common'
+import type { SyntaxNode, Tree } from '@lezer/common'
 import { PANDOC_ATTRIBUTE_SCHEMA } from '@common/pandoc-util/pandoc-attribute-schema'
 import { tokenizeAttributes, updateAttributeList } from '@common/pandoc-util/pandoc-brace-attributes'
 import { minimalChange } from '@common/pandoc-util/pandoc-directive-comment'
-import { isRenderableImageNode } from './image-only-lines'
-import { rangeInSelection } from './range-in-selection'
+import { isRenderableImageNode, redundantAttributeRuns } from './image-only-lines'
+import { shouldRevealSource } from './reveal-selection'
+
+/**
+ * How long building the changes for a new image width may parse the document
+ * to make sure that the syntax tree covers the image, in milliseconds
+ */
+const IMAGE_PARSE_TIMEOUT = 200
+
+/**
+ * Matches a brace block at the start of a text, e.g. `{width=50%}` at the
+ * start of `{width=50%} more text`
+ */
+const LEADING_BRACE_BLOCK = /^\{[^{}\n]*\}/
 
 /**
  * Selects a rendered image (its start position, i.e., the `from` of the Image
@@ -95,17 +108,20 @@ function adjacentAttribute (image: SyntaxNode): SyntaxNode|null {
  *
  * @param   {EditorState}                     state  The editor state
  * @param   {number}                          from   The start of the image
+ * @param   {Tree}                            tree   Optional: the syntax tree
+ *                                                   to search; by default the
+ *                                                   current tree of the state
  *
  * @return  {ImageWithAttribute|undefined}           The image and its
  *                                                   attribute, or undefined
  *                                                   if no image starts there
  */
-export function findImageAt (state: EditorState, from: number): ImageWithAttribute|undefined {
+export function findImageAt (state: EditorState, from: number, tree?: Tree): ImageWithAttribute|undefined {
   if (from < 0 || from > state.doc.length) {
     return undefined
   }
 
-  let node: SyntaxNode|null = syntaxTree(state).resolveInner(from, 1)
+  let node: SyntaxNode|null = (tree ?? syntaxTree(state)).resolveInner(from, 1)
   while (node !== null) {
     if (node.name === 'Image' && node.from === from) {
       return { image: node, attribute: adjacentAttribute(node) }
@@ -118,7 +134,9 @@ export function findImageAt (state: EditorState, from: number): ImageWithAttribu
 
 /**
  * Returns the source range of an image including the Pandoc attributes
- * directly following it, e.g. all of `![a](a.png){width=50%}`.
+ * directly following it, e.g. all of `![a](a.png){width=50%}`. Identical
+ * repetitions of the attribute block (`{width=50%}{width=50%}`) belong to the
+ * range as well, since they are hidden together with the attributes.
  *
  * @param   {EditorState}  state      The editor state
  * @param   {number}       imageFrom  The start of the image
@@ -132,7 +150,9 @@ export function imageSourceRange (state: EditorState, imageFrom: number): { from
     return undefined
   }
 
-  return { from: found.image.from, to: found.attribute?.to ?? found.image.to }
+  const runs = redundantAttributeRuns(state, found.image)
+  const to = runs.length > 0 ? runs[runs.length - 1].to : found.attribute?.to ?? found.image.to
+  return { from: found.image.from, to }
 }
 
 /**
@@ -143,7 +163,14 @@ export function imageSourceRange (state: EditorState, imageFrom: number): { from
  * duplicates; otherwise `width=NN%` is appended. `height` and `h` keys are
  * removed so that the image scales proportionally. All other keys, the id,
  * and the classes stay as they are. Without attributes directly after the
- * image, `{width=NN%}` is inserted.
+ * image, `{width=NN%}` is inserted. Only the first attribute block is ever
+ * changed; repetitions after it stay as they are.
+ *
+ * Inserting new braces next to existing ones would duplicate the attribute
+ * block, so the existing block must be found reliably: the document is parsed
+ * at least up to the end of the image line, and braces directly after the
+ * image count as its attribute block even if the syntax tree has no node for
+ * them.
  *
  * @param   {EditorState}   state         The editor state
  * @param   {number}        imageFrom     The start of the image
@@ -155,13 +182,26 @@ export function imageSourceRange (state: EditorState, imageFrom: number): { from
  *                                        changes
  */
 export function buildImageWidthChanges (state: EditorState, imageFrom: number, widthPercent: number): ChangeSpec[] {
-  const found = findImageAt(state, imageFrom)
+  if (imageFrom < 0 || imageFrom > state.doc.length) {
+    return []
+  }
+
+  // Rendered images never span lines, so the tree must cover the image line
+  const lineEnd = state.doc.lineAt(imageFrom).to
+  const tree = ensureSyntaxTree(state, lineEnd, IMAGE_PARSE_TIMEOUT) ?? syntaxTree(state)
+  const found = findImageAt(state, imageFrom, tree)
   if (found === undefined) {
     return []
   }
 
   const width = `${Math.round(widthPercent)}%`
-  const { image, attribute } = found
+  const { image } = found
+  let attribute: { from: number, to: number }|null = found.attribute
+  if (attribute === null) {
+    const braces = LEADING_BRACE_BLOCK.exec(state.sliceDoc(image.to, state.doc.lineAt(image.to).to))
+    attribute = braces === null ? null : { from: image.to, to: image.to + braces[0].length }
+  }
+
   if (attribute === null) {
     return [{ from: image.to, insert: `{width=${width}}` }]
   }
@@ -177,6 +217,46 @@ export function buildImageWidthChanges (state: EditorState, imageFrom: number, w
     : updateAttributeList(inner, 'brace', [], { width, h: undefined }, { h: ['height'] })
 
   return minimalChange(attribute.from + 1, inner, result.text)
+}
+
+/**
+ * Builds the changes that apply an edited image caption. The caption of a
+ * rendered image shows the image title (or the alternative text if there is
+ * no title) with escaped quotes un-escaped. If the edited caption is the same
+ * text, character for character, nothing changes. Otherwise the image source
+ * `![…](…)` is rewritten with the caption as both alternative text and title
+ * (the exporters use one or the other); the Pandoc attributes after the image
+ * lie outside the change and stay exactly as they are.
+ *
+ * @param   {EditorState}   state        The editor state
+ * @param   {number}        imageFrom    The start of the image
+ * @param   {string}        captionText  The text of the caption element
+ *
+ * @return  {ChangeSpec[]}               The changes, or an empty list if the
+ *                                       caption is unchanged or no renderable
+ *                                       image starts at imageFrom
+ */
+export function buildImageCaptionChanges (state: EditorState, imageFrom: number, captionText: string): ChangeSpec[] {
+  const found = findImageAt(state, imageFrom)
+  if (found === undefined || !isRenderableImageNode(state, found.image)) {
+    return []
+  }
+
+  const { image } = found
+  const marks = image.getChildren('LinkMark')
+  const titleNode = image.getChild('LinkTitle')
+  // isRenderableImageNode() guarantees that the last URL is the image source
+  const urlNode = image.getChildren('URL').pop()!
+  const alt = state.sliceDoc(marks[0].to, marks[1].from)
+  const title = titleNode === null ? alt : state.sliceDoc(titleNode.from, titleNode.to)
+  if (captionText === title.replace(/\\"/g, '"')) {
+    return []
+  }
+
+  // Escape quotes to prevent breaking of the image
+  const caption = captionText.replace(/"/g, '\\"')
+  const url = state.sliceDoc(urlNode.from, urlNode.to)
+  return [{ from: image.from, to: image.to, insert: `![${caption}](${url} "${caption}")` }]
 }
 
 /**
@@ -227,7 +307,10 @@ export function computeResizedWidthPercent (geometry: ResizeGeometry): number {
  * Finds the Pandoc attributes (`{…}`) that directly follow rendered images and
  * should therefore be hidden. An attribute is hidden when its image is
  * rendered (renderable and not touched by a selection), it contains no line
- * break, and no selection touches the attribute itself.
+ * break, and no selection touches the attribute itself. Identical repetitions
+ * of the attribute block directly after it (`{width=50%}{width=50%}`) are
+ * hidden together with it, unless a selection lies within them; a different
+ * block after it stays visible.
  *
  * @param   {EditorState}                   state            The editor state
  * @param   {{from: number, to: number}[]}  ranges           The ranges to
@@ -266,20 +349,24 @@ export function findHiddenImageAttributeRanges (
         }
 
         const image = reference.node
-        if (!isRenderableImageNode(state, image) || rangeInSelection(state.selection, image.from, image.to, includeAdjacent)) {
+        const attribute = adjacentAttribute(image)
+        if (!isRenderableImageNode(state, image) || shouldRevealSource(state, 'images', image.from, attribute?.to ?? image.to, includeAdjacent)) {
           return
         }
 
-        const attribute = adjacentAttribute(image)
         if (attribute === null || state.sliceDoc(attribute.from, attribute.to).includes('\n')) {
           return
         }
 
-        if (rangeInSelection(state.selection, attribute.from, attribute.to, includeAdjacent)) {
+        const runs = redundantAttributeRuns(state, image)
+        if (runs.length > 0 && shouldRevealSource(state, 'images', runs[0].from, runs[runs.length - 1].to, false)) {
           return
         }
 
         hidden.set(attribute.from, attribute.to)
+        for (const run of runs) {
+          hidden.set(run.from, run.to)
+        }
       }
     })
   }

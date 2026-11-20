@@ -2,13 +2,15 @@
  * @ignore
  * BEGIN HEADER
  *
- * Contains:        isRenderableImageNode, findImageOnlyLines
+ * Contains:        isRenderableImageNode, redundantAttributeRuns,
+ *                  findImageOnlyLines
  * CVM-Role:        Utility Function
  * License:         GNU GPL v3
  *
  * Description:     Determines which image nodes the image renderer displays,
- *                  and which lines hold nothing but such rendered images, so
- *                  that these lines can be centered.
+ *                  which repeated Pandoc attributes follow an image, and which
+ *                  lines hold nothing but such rendered images, so that these
+ *                  lines can be centered.
  *
  * END HEADER
  */
@@ -16,7 +18,7 @@
 import { syntaxTree } from '@codemirror/language'
 import type { EditorState, Line } from '@codemirror/state'
 import type { SyntaxNode, SyntaxNodeRef, Tree } from '@lezer/common'
-import { rangeInSelection } from './range-in-selection'
+import { shouldRevealSource } from './reveal-selection'
 
 /**
  * Checks whether the image renderer can display the given node as an image.
@@ -52,8 +54,50 @@ export function isRenderableImageNode (state: EditorState, node: SyntaxNodeRef):
 }
 
 /**
+ * Finds the repetitions of the Pandoc attribute block of an image: the blocks
+ * that directly follow the attribute block right after the image (no
+ * whitespace in between) and are identical to it character for character,
+ * e.g. the second `{width=50%}` in `![a](a.png){width=50%}{width=50%}`. For
+ * Pandoc, only the first block is an attribute; the repetitions are text. A
+ * block that differs from the first ends the run.
+ *
+ * @param   {EditorState}  state  The editor state
+ * @param   {SyntaxNode}   image  The Image node
+ *
+ * @return  {Array<{ from: number, to: number }>}  The ranges of the repeated
+ *                                                 blocks, in ascending order;
+ *                                                 empty if the image has no
+ *                                                 attribute block or it is not
+ *                                                 repeated
+ */
+export function redundantAttributeRuns (state: EditorState, image: SyntaxNode): Array<{ from: number, to: number }> {
+  const attribute = image.nextSibling
+  if (attribute === null || attribute.name !== 'PandocAttribute' || attribute.from !== image.to) {
+    return []
+  }
+
+  const attributeText = state.sliceDoc(attribute.from, attribute.to)
+  if (attributeText.length < 2 || attributeText.includes('\n')) {
+    return []
+  }
+
+  // The repetitions are compared as text, since they need not be parsed as
+  // attribute nodes of their own
+  const lineEnd = state.doc.lineAt(attribute.to).to
+  const runs: Array<{ from: number, to: number }> = []
+  let position = attribute.to
+  while (position + attributeText.length <= lineEnd && state.sliceDoc(position, position + attributeText.length) === attributeText) {
+    runs.push({ from: position, to: position + attributeText.length })
+    position += attributeText.length
+  }
+
+  return runs
+}
+
+/**
  * Checks whether a line holds nothing but rendered images, the Pandoc
- * attributes directly following them, and whitespace.
+ * attributes directly following them (including identical repetitions of
+ * these attributes), and whitespace.
  *
  * @param   {EditorState}  state            The editor state
  * @param   {Tree}         tree             The syntax tree of the state
@@ -89,15 +133,26 @@ function isImageOnlyLine (state: EditorState, tree: Tree, line: Line, includeAdj
       return false
     }
 
-    if (!isRenderableImageNode(state, image) || rangeInSelection(state.selection, image.from, image.to, includeAdjacent)) {
+    const attribute = image.nextSibling
+    const sourceTo = attribute?.name === 'PandocAttribute' && attribute.from === image.to ? attribute.to : image.to
+    if (!isRenderableImageNode(state, image) || shouldRevealSource(state, 'images', image.from, sourceTo, includeAdjacent)) {
       return false
     }
 
     removedRanges.push({ from: image.from, to: image.to })
 
-    const attribute = image.nextSibling
     if (attribute !== null && attribute.name === 'PandocAttribute' && attribute.from === image.to && attribute.to <= line.to) {
       removedRanges.push({ from: attribute.from, to: attribute.to })
+
+      // Repetitions of the attribute block are hidden as well, unless a
+      // selection touches them (then they are shown as text)
+      const runs = redundantAttributeRuns(state, image)
+      if (runs.length > 0) {
+        if (shouldRevealSource(state, 'images', runs[0].from, runs[runs.length - 1].to, false)) {
+          return false
+        }
+        removedRanges.push(...runs)
+      }
     }
   }
 
