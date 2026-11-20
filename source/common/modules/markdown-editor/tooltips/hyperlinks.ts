@@ -15,7 +15,7 @@
 import { hoverTooltip, type EditorView, type Tooltip } from '@codemirror/view'
 import { syntaxTree } from '@codemirror/language'
 import { configField } from '../util/configuration'
-import makeValidUri from '@common/util/make-valid-uri'
+import tryMakeValidUri from '@common/util/try-make-valid-uri'
 import { shortenUrlVisually } from '@common/util/shorten-url-visually'
 import { trans } from '@common/i18n-renderer'
 import { pathDirname } from '@common/util/renderer-path-polyfill'
@@ -71,7 +71,10 @@ export function urlTooltip (view: EditorView, pos: number, side: 1 | -1): Toolti
   const absPath = view.state.field(configField).metadata.path
   const url = view.state.sliceDoc(node.from, node.to)
   const base = pathDirname(absPath)
-  const validURI = makeValidUri(url, base)
+  const validURI = tryMakeValidUri(url, base)
+  if (validURI === null) {
+    return null // The link cannot be parsed into a valid URL
+  }
 
   return {
     pos,

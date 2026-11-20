@@ -22,7 +22,7 @@ import { CITEPROC_MAIN_DB } from '@dts/common/citeproc'
 import { configField } from '../util/configuration'
 import type { FindFileAndReturnMetadataResult } from 'source/app/service-providers/commands/file-find-and-return-meta-data'
 import { pathDirname } from 'source/common/util/renderer-path-polyfill'
-import makeValidUri from 'source/common/util/make-valid-uri'
+import tryMakeValidUri from 'source/common/util/try-make-valid-uri'
 import type { ForceOpenAPI } from 'source/app/service-providers/commands/force-open'
 import { sanitizeHTML } from 'source/common/util/sanitize-html'
 import { evaluateBracketedFormula } from 'source/common/util/formula-quantity-calculator'
@@ -52,6 +52,11 @@ async function filePreviewTooltip (view: EditorView, pos: number, side: 1 | -1):
     return null
   }
 
+  // PDF++ links into PDFs (R60) have no Markdown preview
+  if (/\.pdf$/i.test(fileToDisplay.split('#')[0].trim())) {
+    return null
+  }
+
   const res: FindFileAndReturnMetadataResult|undefined = await ipcRenderer.invoke(
     'application',
     { command: 'file-find-and-return-meta-data', payload: fileToDisplay }
@@ -76,6 +81,25 @@ async function filePreviewTooltip (view: EditorView, pos: number, side: 1 | -1):
       }
     }
   }
+}
+
+/**
+ * Resolves the source of an image in the file preview: data URLs stay as they
+ * are, other sources are made absolute against the previewed file's
+ * directory. A source that cannot be turned into a valid URI is returned
+ * unchanged, so that only this image fails to load.
+ *
+ * @param   {string}  src       The image source as written
+ * @param   {string}  basePath  The directory of the previewed file
+ *
+ * @return  {string}            The source to load
+ */
+export function resolvePreviewImageSource (src: string, basePath: string): string {
+  const isDataUrl = /^data:[a-zA-Z0-9/;=]+(?:;base64){0,1},.+/.test(src)
+  if (isDataUrl) {
+    return src
+  }
+  return tryMakeValidUri(src, basePath) ?? src
 }
 
 /**
@@ -111,12 +135,7 @@ function getPreviewElement (metadata: FindFileAndReturnMetadataResult, linkConte
       onCitation: window.getCitationCallback(CITEPROC_MAIN_DB),
       // Convert the image links to absolute (if necessary)
       onImageSrc (src) {
-        const isDataUrl = /^data:[a-zA-Z0-9/;=]+(?:;base64){0,1},.+/.test(src)
-        if (isDataUrl) {
-          return src
-        } else {
-          return makeValidUri(src, basePath)
-        }
+        return resolvePreviewImageSource(src, basePath)
       }
     }
   )
