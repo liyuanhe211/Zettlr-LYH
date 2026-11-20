@@ -15,6 +15,7 @@ import { type DecorationSet, EditorView } from '@codemirror/view'
 import { type EditorState, StateField } from '@codemirror/state'
 import { subviewUpdatePlugin } from './subview'
 import { LOCKED_WIDTHS_ATTRIBUTE, TableWidget } from './widget'
+import { COLUMN_RESIZED_CLASS, COLUMN_RESIZE_HOVER_CLASS } from './column-resize'
 import { TABLE_WIDGET_WRAPPER_CLASS } from './widget-dom'
 import { CELL_RANGE_SELECTED_CLASS, cellRangeSelection } from './cell-range-selection'
 
@@ -107,6 +108,14 @@ export const renderTables = [
       margin: '0 2px 0 6px', // Taken from .cm-line so that tables align
       overflow: 'auto'
     },
+    // While the mouse is on a vertical line between two columns (or a column
+    // is being dragged), everything in the widget shows the resize cursor. The
+    // wrapper has the class as well as the table because the right edge of the
+    // grab area of the last column lies outside of the table (see
+    // column-resize.ts).
+    [`div.cm-table-editor-widget-wrapper.${COLUMN_RESIZE_HOVER_CLASS}, div.cm-table-editor-widget-wrapper.${COLUMN_RESIZE_HOVER_CLASS} *`]: {
+      cursor: 'col-resize !important'
+    },
     'div.cm-table-editor-widget-wrapper table': {
       // BUG: Somehow the `drawSelection` extension does not properly override
       // the native selections. By essentially copying out the
@@ -128,6 +137,11 @@ export const renderTables = [
         }
       },
       borderCollapse: 'collapse',
+      // The text in a column that has a width set by dragging wraps at any
+      // character, so that the column can be narrower than its longest word.
+      [`& td.${COLUMN_RESIZED_CLASS}, & th.${COLUMN_RESIZED_CLASS}`]: {
+        overflowWrap: 'anywhere'
+      },
       // Implement Artem's theme
       '& td, & th': {
         textAlign: 'left',
@@ -136,7 +150,9 @@ export const renderTables = [
         position: 'relative',
         border: `1px solid ${COLORS.colorNeutral08}`,
         padding: '0px',
-        minWidth: '96px',
+        // Only a small floor so that columns with short contents (e.g., a
+        // step number) can shrink to fit, while empty columns stay clickable.
+        minWidth: '3em',
         // Content wrapper styles
         '& div.content': {
           padding: '4px 6px',

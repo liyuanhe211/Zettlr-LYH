@@ -36,8 +36,11 @@ import { trans } from 'source/common/i18n-renderer'
 import type { StatusbarItem } from '../statusbar'
 import { renderHorizontalRules } from './render-hr'
 import { renderBlockquotes } from './render-blockquotes'
+import { headingStyle } from './render-heading-style'
 import { renderAdmonitions } from './render-admonitions'
 import { renderRawAdmonitions } from '../plugins/admonitions-raw'
+import { renderRevisions } from './render-revisions'
+import { fenceLineFold } from '../plugins/fence-line-fold'
 
 const renderCompartment = new Compartment()
 
@@ -72,12 +75,19 @@ function configureRenderers (config: Partial<EditorConfiguration>, ext?: Extensi
   updateExtension(renderTables, isPreview && config.renderTables, ext)
   updateExtension(renderIframes, isPreview && config.renderIframes, ext)
   updateExtension(renderEmphasis, isPreview && config.renderEmphasis, ext)
+  // Zettlr-LYH (R165): folds the fence lines whose marks renderEmphasis hides
+  updateExtension(fenceLineFold, isPreview && config.renderEmphasis, ext)
   updateExtension(renderBlockquotes, isPreview && config.renderEmphasis, ext)
+  // Zettlr-LYH: configured heading sizes and weights, rules above headings
+  updateExtension(headingStyle, !isRaw, ext)
   updateExtension(renderPandoc, isPreview && config.renderPandoc, ext)
   updateExtension(renderHtmlSpans, isPreview && config.renderPandoc, ext)
   updateExtension(renderHtmlBlocks, isPreview && config.renderPandoc, ext)
   updateExtension(renderFormulas, isPreview, ext)
   updateExtension(renderHorizontalRules, isPreview && config.renderHorizontalRules, ext)
+  // Zettlr-LYH (R84): tracked changes; Show Revisions is read from the
+  // configuration by the renderer itself, raw mode shows the source
+  updateExtension(renderRevisions, isPreview, ext)
 
   // One of the two admonition renderers must always be on
   updateExtension(renderAdmonitions, isPreview && config.renderAdmonitions, ext)

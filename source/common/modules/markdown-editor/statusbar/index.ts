@@ -17,7 +17,7 @@ import { StateEffect, StateField, type EditorState } from '@codemirror/state'
 import { configUpdateEffect } from '../util/configuration'
 import { magicQuotesStatus } from './magic-quotes'
 import { readabilityStatus } from '../renderers/readability'
-import { cursorStatus, wordcountStatus, charcountStatus, inputModeStatus } from './info-fields'
+import { cursorStatus, wordcountStatus, charcountStatus, tokenEstimateStatus, inputModeStatus, syncHealthStatus, SYNC_HEALTH_STATUS_CLASS } from './info-fields'
 import { languageToolStatus } from './language-tool'
 import { diagnosticsStatus } from './diagnostics'
 import { statusbarProjectInfo } from '../plugins/project-info-field'
@@ -47,6 +47,11 @@ export interface StatusbarItem {
    * @param   {MouseEvent}  event  The mouse event.
    */
   onClick?: (event: MouseEvent) => void
+  /**
+   * An optional class added to the item next to `cm-statusbar-item`, for
+   * items that need a look of their own (Zettlr-LYH R173).
+   */
+  className?: string
 }
 
 /**
@@ -73,6 +78,8 @@ function createStatusbar (_view: EditorView): Panel {
       const elements: StatusbarItem[] = []
       // NOTE: Order here determines the order in the statusbar
       const items = [
+        // Zettlr-LYH (R173): the warning about undelivered input comes first
+        syncHealthStatus,
         statusbarProjectInfo,
         magicQuotesStatus,
         renderingModeToggle,
@@ -80,6 +87,7 @@ function createStatusbar (_view: EditorView): Panel {
         cursorStatus,
         wordcountStatus,
         charcountStatus,
+        tokenEstimateStatus,
         inputModeStatus,
         languageToolStatus,
         diagnosticsStatus
@@ -102,6 +110,9 @@ function createStatusbar (_view: EditorView): Panel {
           span.textContent = element.content
         }
         span.className = 'cm-statusbar-item'
+        if (element.className !== undefined && element.className !== '') {
+          span.classList.add(element.className)
+        }
         if (element.onClick !== undefined) {
           span.addEventListener('mousedown', element.onClick)
         }
@@ -152,6 +163,14 @@ const statusbarTheme = EditorView.baseTheme({
   },
   '.cm-statusbar .cm-statusbar-item:not(:first-child)': {
     borderLeft: '1px solid gray'
+  },
+  // Zettlr-LYH (R173): the warning about undelivered input, in the warning
+  // colours of the window (generic.css); provisional until the user confirms it
+  [`.cm-statusbar .cm-statusbar-item.${SYNC_HEALTH_STATUS_CLASS}`]: {
+    backgroundColor: 'var(--zettlr-warning-bg)',
+    color: 'var(--zettlr-warning-color)',
+    outline: '1px solid var(--zettlr-warning-color)',
+    fontWeight: 'bold'
   }
 })
 

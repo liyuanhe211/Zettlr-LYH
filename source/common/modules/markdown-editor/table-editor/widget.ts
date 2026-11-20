@@ -19,7 +19,6 @@ import type { Rect, DecorationSet } from '@codemirror/view'
 import { WidgetType, EditorView, Decoration } from '@codemirror/view'
 import type { SyntaxNode } from '@lezer/common'
 import type { TableRow, Table } from '../../markdown-utils/markdown-ast'
-import { parseTableNode } from '../../markdown-utils/markdown-ast/parse-table-node'
 import { nodeToHTML } from '../../markdown-utils/markdown-to-html'
 import { createSubviewForCell, hiddenSpanField } from './subview'
 import { getCoordinatesForRange } from './commands/util'
@@ -33,6 +32,15 @@ import { renderCellTaskCheckboxes } from './cell-tasks'
 import { cellContentsChanged, forgetCellContents, renderCellContents } from './cell-contents'
 import { sourceOffsetForCellClick } from './cell-caret'
 import { activeCellRangeBounds, CELL_RANGE_SELECTED_CLASS, type CellRangeBounds, isCellInBounds, trackCellDrag } from './cell-range-selection'
+import { handleCellImageMousedown } from './cell-image-clicks'
+import { applyColumnWidths, attachColumnResize, type ColumnResizeHost, reapplyColumnWidths, rememberedColumnWidths } from './column-resize'
+import { MISSING_CELL_ATTRIBUTE, missingCellsInsertion, parseRenderableTable, renderableTables } from './util/table-nodes'
+
+/**
+ * Zettlr-LYH: Cells whose subview is waiting for the next animation frame to be
+ * mounted, together with the cell bounds the subview will edit
+ */
+const PENDING_SUBVIEW_MOUNTS = new WeakMap<HTMLDivElement, { from: number, to: number }>()
 
 /**
  * This holds the last measured height of each rendered table to provide
@@ -104,7 +112,11 @@ export class TableWidget extends WidgetType {
   // For more background, see issue #5940.
   private readonly meanRowHeight = 100
 
-  constructor (readonly ast: Table, readonly node: SyntaxNode) {
+  // NOTE: `tableIndex` is the position of the table among the top-level tables
+  // of the document. Together with the document's path, it is the key under
+  // which the column widths set by dragging are remembered (see
+  // column-resize.ts).
+  constructor (readonly ast: Table, readonly node: SyntaxNode, readonly tableIndex: number = 0) {
     super()
   }
 
@@ -144,12 +156,12 @@ export class TableWidget extends WidgetType {
   toDOM (view: EditorView): HTMLElement {
     try {
       const { wrapper, table } = generateEmptyTableWidgetElement()
-      const tableAST = parseTableNode(this.node, view.state.sliceDoc())
-      if (tableAST.type !== 'Table') {
+      const tableAST = parseRenderableTable(this.node, view.state.sliceDoc())
+      if (tableAST === undefined) {
         throw new Error('Cannot render table: Likely malformed')
       }
 
-      updateTable(table, tableAST, view)
+      updateTable(table, tableAST, view, this.tableIndex)
 
       const cacheKey = this.cacheKey
       view.requestMeasure({
@@ -160,6 +172,7 @@ export class TableWidget extends WidgetType {
       })
 
       interceptAnchorClicks(wrapper, href => openMarkdownLink(href, view))
+      attachColumnResize(wrapper, table, columnResizeHost(view))
 
       return wrapper
     } catch (err: unknown) {
@@ -180,10 +193,10 @@ export class TableWidget extends WidgetType {
       return false
     }
 
-    const tableAST = parseTableNode(this.node, view.state.sliceDoc())
-    if (tableAST.type === 'Table') {
+    const tableAST = parseRenderableTable(this.node, view.state.sliceDoc())
+    if (tableAST !== undefined) {
       const prevHeight = TABLE_HEIGHT_CACHE.get(this.cacheKey) ?? 0
-      updateTable(table, tableAST, view)
+      updateTable(table, tableAST, view, this.tableIndex)
       // Instruct the editor to remeasure its height; see
       // https://discuss.codemirror.net/t/5604
       // NOTE: `dom` is the widget's wrapper element, which is what has to be
@@ -280,37 +293,17 @@ export class TableWidget extends WidgetType {
     // We try to retrieve the full syntax tree, and if that fails, fall back to
     // the (possibly incomplete) syntax tree.
     const tree = ensureSyntaxTree(state, state.doc.length, 500) ?? syntaxTree(state)
-    // Constantly calling `sliceDoc()` within the tree traversal
-    // below has some negative performance impacts, so we extract
-    // the markdown text outside of the loop
-    const markdown = state.sliceDoc()
 
-    const newDecos: Array<Range<Decoration>> = tree
-      // Get all Table nodes in the document
-      .topNode.getChildren('Table')
-      .map(node => {
-        return { node, ast: parseTableNode(node, markdown) }
-      })
-      .filter(({ ast }) => {
-        // The TableEditor cannot support grid tables, since they can have
-        // (a) colspans and rowspans, and (b) multiple lines, which is just
-        // too difficult to represent using our approach here. (Also, grids
-        // are much easier to parse visually than pipes and less common,
-        // reducing the need for us to support them.)
-        if (ast.type === 'Table' && ast.tableType === 'pipe') {
-          const rowLength = ast.alignment?.length ?? 0
-          return ast.rows.every(r => r.cells.length === rowLength)
-        }
-
-        return false
-      })
-      // Turn the nodes into Decorations
-      .map(({ node, ast }) => {
+    // Zettlr-LYH: The tables at the top level and inside blockquotes (see
+    // renderableTables in util/table-nodes.ts)
+    const newDecos: Array<Range<Decoration>> = renderableTables(state, tree)
+      // Turn the tables into Decorations
+      .map(({ node, ast, tableIndex, from, to }) => {
         return Decoration.replace({
-          widget: new TableWidget(ast as Table, node.node),
+          widget: new TableWidget(ast, node, tableIndex),
           // inclusive: false,
           block: true
-        }).range(node.from, node.to)
+        }).range(from, to)
       })
     return Decoration.set(newDecos, true)
   }
@@ -320,11 +313,13 @@ export class TableWidget extends WidgetType {
  * This function takes a DOM-node and a string representing the same Markdown
  * table and ensures that the DOM-node representation conforms to the string.
  *
- * @param  {HTMLTableElement}  table     The DOM-element containing the table
- * @param  {Table}             tableAST  The table AST node
- * @param  {EditorView}        view      The EditorView
+ * @param  {HTMLTableElement}  table       The DOM-element containing the table
+ * @param  {Table}             tableAST    The table AST node
+ * @param  {EditorView}        view        The EditorView
+ * @param  {number}            tableIndex  The table's position among the
+ *                                         top-level tables of the document
  */
-function updateTable (table: HTMLTableElement, tableAST: Table, view: EditorView): void {
+function updateTable (table: HTMLTableElement, tableAST: Table, view: EditorView, tableIndex: number): void {
   // Before we get started in updating the table, we need to find and remove all
   // handle elements we have in the table. They will be re-inserted in the
   // updateRow function calls below.
@@ -363,6 +358,17 @@ function updateTable (table: HTMLTableElement, tableAST: Table, view: EditorView
   // requests to this table.
   table.dataset.tableFrom = String(tableAST.from)
   table.dataset.tableTo = String(tableAST.to)
+  table.dataset.tableIndex = String(tableIndex)
+
+  // The widths of the columns that the user has dragged to a width. They are
+  // applied before the column width lock below measures the table.
+  const columnCount = tableAST.rows[0]?.cells.length ?? 0
+  const documentPath = view.state.field(configField).metadata.path
+  applyColumnWidths(
+    table,
+    rememberedColumnWidths(documentPath, tableIndex, columnCount) ?? [],
+    table.getAttribute(LOCKED_WIDTHS_ATTRIBUTE) === 'true'
+  )
 
   manageColumnWidthLock(table, tableAST, view, coords, selectedCells !== undefined)
 }
@@ -496,6 +502,33 @@ function unlockColumnWidths (table: HTMLTableElement): void {
   table.style.width = ''
   table.removeAttribute(LOCKED_WIDTHS_ATTRIBUTE)
   delete table.dataset.lockedColumnCount
+
+  // The widths of the columns the user has dragged to a width are not part of
+  // the lock: Give them back to the cells.
+  reapplyColumnWidths(table)
+}
+
+/**
+ * Tells the column resizing (see column-resize.ts) what it needs to know of
+ * this table widget.
+ *
+ * @param   {EditorView}         view  The main EditorView
+ *
+ * @return  {ColumnResizeHost}         The host
+ */
+function columnResizeHost (view: EditorView): ColumnResizeHost {
+  return {
+    documentPath: () => view.state.field(configField).metadata.path,
+    isLocked: table => table.getAttribute(LOCKED_WIDTHS_ATTRIBUTE) === 'true',
+    resized: table => {
+      // The resized columns wrap their contents differently, which changes the
+      // table's height: Update the height cache and have CodeMirror re-measure,
+      // mirroring what updateDOM does.
+      TABLE_HEIGHT_CACHE.set(table.dataset.tableFrom ?? '', measureWidgetHeight(table))
+      view.requestMeasure()
+    },
+    refit: table => { refitColumnWidths(table, view, table.dataset.tableFrom ?? '', true) }
+  }
 }
 
 /**
@@ -624,13 +657,29 @@ function updateRow (
           return
         }
 
+        // The cell's usual handling of a button press: place the cursor at
+        // the pressed position (which opens the cell's editor) and follow a
+        // drag from there.
+        const placeCursorAndTrackDrag = (pressEvent: MouseEvent): void => {
+          const anchor = setSelectionToCell(td, pressEvent, view)
+          if (pressEvent.button === 0) {
+            trackCellDrag(view, td, pressEvent, anchor, false)
+          }
+        }
+
+        // A click on one of the cell's images may instead open the image
+        // lightbox or select the image's source (see cell-image-clicks.ts).
+        const placeCursor = (pressEvent: MouseEvent): void => {
+          setSelectionToCell(td, pressEvent, view)
+        }
+        if (handleCellImageMousedown(view, td, event, { placeCursorAndTrackDrag, placeCursor })) {
+          return
+        }
+
         event.preventDefault()
         event.stopPropagation()
 
-        const anchor = setSelectionToCell(td, event, view)
-        if (event.button === 0) {
-          trackCellDrag(view, td, event, anchor, false)
-        }
+        placeCursorAndTrackDrag(event)
       })
 
       td.addEventListener('contextmenu', (event) => {
@@ -677,6 +726,12 @@ function updateRow (
     // include whitespace here (minus one space padding if applicable).
     tds[i].dataset.cellFrom = String(cell.from)
     tds[i].dataset.cellTo = String(cell.to)
+    // Zettlr-LYH: Cells the row leaves out (see parseRenderableTable)
+    if (cell.attributes[MISSING_CELL_ATTRIBUTE] === 'true') {
+      tds[i].dataset.missingCell = 'true'
+    } else {
+      delete tds[i].dataset.missingCell
+    }
     tds[i].style.textAlign = align[i] ?? ''
     tds[i].classList.toggle(CELL_RANGE_SELECTED_CLASS, selectedCells !== undefined && isCellInBounds(selectedCells, idx, i))
 
@@ -713,28 +768,58 @@ function updateRow (
       // the inserted characters at completely arbitrary positions of the table.
       // So, here we enforce that the main selection is definitely somewhere
       // inside the table cell *content*.
-      const sel = view.state.selection.main
-      const newFrom = Math.min(Math.max(sel.from, cell.from), cell.to)
-      const newTo = Math.min(Math.max(sel.to, cell.from), cell.to)
-
       // NOTE: This entire code runs during updates (since that's when the
       // widget's updateDOM function will be called), so we must wait until that
       // update is complete before we do anything.
-      requestAnimationFrame(() => {
-        if (newFrom !== sel.from || newTo !== sel.to) {
-          view.dispatch({ selection: { anchor: newFrom, head: newTo } })
-        }
+      // Zettlr-LYH: The main view can update several times before that frame
+      // (e.g., a click followed by a drag). Only one mount may be pending per
+      // cell, and it uses the cell's latest bounds. A second mount would empty
+      // the cell and leave the first subview alive outside the document, where
+      // it no longer receives the main view's changes and later forwards
+      // transactions of the wrong length ("Mismatched change set lengths").
+      const pending = PENDING_SUBVIEW_MOUNTS.get(contentWrapper)
+      if (pending !== undefined) {
+        pending.from = cell.from
+        pending.to = cell.to
+      } else {
+        const mount = { from: cell.from, to: cell.to }
+        PENDING_SUBVIEW_MOUNTS.set(contentWrapper, mount)
+        requestAnimationFrame(() => {
+          if (PENDING_SUBVIEW_MOUNTS.get(contentWrapper) !== mount || !view.dom.contains(contentWrapper)) {
+            // The selection has left the cell, or the table has been re-rendered
+            PENDING_SUBVIEW_MOUNTS.delete(contentWrapper)
+            return
+          }
 
-        // Create a new subview to represent the selection here. Ensure the cell
-        // itself is empty before we mount the subview.
-        // NOTE: Forget the rendered contents, so that the cell is re-rendered
-        // once the subview is gone, no matter who destroyed it.
-        forgetCellContents(contentWrapper)
-        contentWrapper.innerHTML = ''
-        createSubviewForCell(view, contentWrapper, { from: cell.from, to: cell.to })
-        contentWrapper.classList.add('editing')
-      })
+          const sel = view.state.selection.main
+          const newFrom = Math.min(Math.max(sel.from, mount.from), mount.to)
+          const newTo = Math.min(Math.max(sel.to, mount.from), mount.to)
+          if (newFrom !== sel.from || newTo !== sel.to) {
+            view.dispatch({ selection: { anchor: newFrom, head: newTo } })
+          }
+
+          if (PENDING_SUBVIEW_MOUNTS.get(contentWrapper) !== mount) {
+            return
+          }
+          PENDING_SUBVIEW_MOUNTS.delete(contentWrapper)
+          if (!view.dom.contains(contentWrapper) || EditorView.findFromDOM(contentWrapper) !== null) {
+            return
+          }
+
+          // Create a new subview to represent the selection here. Ensure the cell
+          // itself is empty before we mount the subview.
+          // NOTE: Forget the rendered contents, so that the cell is re-rendered
+          // once the subview is gone, no matter who destroyed it.
+          forgetCellContents(contentWrapper)
+          contentWrapper.innerHTML = ''
+          createSubviewForCell(view, contentWrapper, { from: mount.from, to: mount.to })
+          contentWrapper.classList.add('editing')
+        })
+      }
     } else if (subview === null) {
+      // The selection is not in this cell (anymore): Drop a mount that is
+      // still waiting for its frame.
+      PENDING_SUBVIEW_MOUNTS.delete(contentWrapper)
       // Simply transfer the contents
       const { zknLinkFormat } = view.state.field(configField)
       const html = nodeToHTML(cell.children, {
@@ -782,6 +867,22 @@ function updateRow (
  * @return  {number}                       The new cursor position
  */
 function setSelectionToCell (td: HTMLTableCellElement, event: MouseEvent, view: EditorView): number {
+  // Zettlr-LYH: A cell the row leaves out has no source yet. Write the row's
+  // missing cells and place the cursor in the clicked one; the table is then
+  // re-rendered with a real cell there, which receives the cell editor.
+  if (td.dataset.missingCell === 'true') {
+    const row = td.parentElement
+    const cells = row !== null ? [...row.children].filter(element => element instanceof HTMLTableCellElement) : [td]
+    const missingCells = cells.filter(element => (element as HTMLElement).dataset.missingCell === 'true')
+    // The row's first cell is a real one (a row has at least one cell), and
+    // it lies on the row's line
+    const firstCell = cells[0] as HTMLElement
+    const line = view.state.doc.lineAt(parseInt(firstCell.dataset.cellFrom ?? td.dataset.cellFrom ?? '0', 10))
+    const { insert, from, cursor } = missingCellsInsertion(line.text, line.to, missingCells.length, Math.max(0, missingCells.indexOf(td)))
+    view.dispatch({ changes: { from, insert }, selection: { anchor: cursor } })
+    return cursor
+  }
+
   // NOTE: Read the cell's range and source at the time of the click, since the
   // listeners outlive any edits to the cell.
   const cellFrom = parseInt(td.dataset.cellFrom ?? '0', 10)

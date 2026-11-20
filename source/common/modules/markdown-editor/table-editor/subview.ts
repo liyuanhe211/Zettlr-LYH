@@ -16,8 +16,8 @@
  * END HEADER
  */
 
-import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
-import { EditorState, MapMode, StateField, EditorSelection, type ChangeSpec, type Range } from '@codemirror/state'
+import { syntaxHighlighting, defaultHighlightStyle, syntaxTree } from '@codemirror/language'
+import { Compartment, EditorState, MapMode, StateField, EditorSelection, type ChangeSpec, type Range } from '@codemirror/state'
 import { EditorView, drawSelection, type DecorationSet, Decoration, ViewPlugin, type ViewUpdate, WidgetType } from '@codemirror/view'
 import markdownParser from '../parser/markdown-parser'
 import { tableEditorKeymap } from '../keymaps/table-editor'
@@ -28,6 +28,12 @@ import { darkMode, useDarkModeEditor } from '../theme/dark-mode'
 import { markdownSyntaxHighlighter } from '../theme/syntax'
 import { clickListeners } from '../plugins/click-listeners'
 import { lineBreakEndPositions } from './cell-navigation'
+import { CELL_TASK_CHECKBOX_CLASS, findCellTaskMarkers } from './cell-tasks'
+import { freezeRevealDuringPointerSelection, shouldRevealSource } from '../util/reveal-selection'
+import { TABLE_WIDGET_WRAPPER_CLASS } from './widget-dom'
+import { renderHtmlSpans } from '../renderers/render-html-span'
+import { parseVoidHtmlTag } from '../util/html-span-tags'
+import { mdTableImagePasteHandlers } from '../plugins/md-paste-drop-handlers'
 
 /**
  * A transaction filter that ensures that any changes made to the view that
@@ -226,7 +232,27 @@ const cellLineBreakDeco = Decoration.widget({ widget: new CellLineBreakWidget(),
 function createLineBreakDecorations (state: EditorState): DecorationSet {
   const [ cellFrom, cellTo ] = state.field(hiddenSpanField).cellRange
   const positions = lineBreakEndPositions(state.sliceDoc(cellFrom, cellTo), cellFrom)
-  return Decoration.set(positions.map(position => cellLineBreakDeco.range(position)))
+  const configuration = state.field(configField)
+  const renderedBreaks = new Set<number>()
+  if (configuration.renderingMode === 'preview' && configuration.renderPandoc) {
+    // The shared HTML renderer already replaces hidden <br> tags with a
+    // break. Only add the cell's extra break when the source remains visible.
+    syntaxTree(state).iterate({
+      from: cellFrom,
+      to: cellTo,
+      enter (node) {
+        if (node.name !== 'HTMLTag') {
+          return
+        }
+        if (parseVoidHtmlTag(state.sliceDoc(node.from, node.to))?.name === 'br' &&
+          !shouldRevealSource(state, 'html', node.from, node.to, configuration.previewModeShowSyntaxWhenCursorIsAdjacent)) {
+          renderedBreaks.add(node.to)
+        }
+        return false
+      }
+    })
+  }
+  return Decoration.set(positions.filter(position => !renderedBreaks.has(position)).map(position => cellLineBreakDeco.range(position)))
 }
 
 /**
@@ -242,12 +268,67 @@ const cellLineBreakPlugin = ViewPlugin.fromClass(class {
   }
 
   update (update: ViewUpdate): void {
-    if (update.docChanged) {
-      this.decorations = createLineBreakDecorations(update.state)
-    }
+    // Selection, pointer-release, configuration and parser updates can all
+    // change which <br> tags the shared HTML renderer hides.
+    this.decorations = createLineBreakDecorations(update.state)
   }
 }, {
   decorations: plugin => plugin.decorations
+})
+
+// Table-cell task prefixes are inline table text rather than TaskMarker nodes.
+// Render only their marker, leaving the cell's existing source editor intact.
+class CellTaskWidget extends WidgetType {
+  constructor (readonly from: number, readonly checked: boolean) {
+    super()
+  }
+
+  eq (other: CellTaskWidget): boolean {
+    return this.from === other.from && this.checked === other.checked
+  }
+
+  toDOM (view: EditorView): HTMLElement {
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    checkbox.className = CELL_TASK_CHECKBOX_CLASS
+    checkbox.setAttribute('aria-label', 'Toggle task')
+    checkbox.checked = this.checked
+    checkbox.addEventListener('click', event => {
+      event.preventDefault()
+      event.stopPropagation()
+      view.dispatch({ changes: { from: this.from + 1, to: this.from + 2, insert: this.checked ? ' ' : 'x' } })
+      view.focus()
+    })
+    return checkbox
+  }
+
+  ignoreEvent (event: Event): boolean {
+    return event instanceof MouseEvent && event.type === 'mousedown'
+  }
+}
+
+function createCellTaskDecorations (state: EditorState): DecorationSet {
+  const configuration = state.field(configField)
+  if (configuration.renderingMode === 'raw' || !configuration.renderTasks) {
+    return Decoration.none
+  }
+  const [ cellFrom, cellTo ] = state.field(hiddenSpanField).cellRange
+  const decorations: Array<Range<Decoration>> = []
+  for (const marker of findCellTaskMarkers(state.sliceDoc(cellFrom, cellTo))) {
+    const from = cellFrom + marker.offset
+    if (!shouldRevealSource(state, 'checkboxes', from, from + 3, configuration.previewModeShowSyntaxWhenCursorIsAdjacent)) {
+      decorations.push(Decoration.replace({ widget: new CellTaskWidget(from, marker.checked), inclusive: false }).range(from, from + 3))
+    }
+  }
+  return Decoration.set(decorations)
+}
+
+const cellTaskField = StateField.define<DecorationSet>({
+  create: createCellTaskDecorations,
+  update (_value, transaction) {
+    return createCellTaskDecorations(transaction.state)
+  },
+  provide: field => EditorView.decorations.from(field)
 })
 
 /**
@@ -263,6 +344,9 @@ export function createSubviewForCell (
 ): void {
   const cfg: EditorConfiguration = JSON.parse(JSON.stringify(mainView.state.field(configField)))
   const themes = getMainEditorThemes()
+  const htmlRendering = new Compartment()
+  const htmlExtensions = (configuration: EditorConfiguration) =>
+    configuration.renderingMode === 'preview' && configuration.renderPandoc ? renderHtmlSpans : []
 
   const state = EditorState.create({
     // Subviews always hold the entire document. This is to make synchronizing
@@ -279,10 +363,21 @@ export function createSubviewForCell (
       tableEditorKeymap(mainView, cfg.shortcuts),
       drawSelection({ drawRangeCursor: false, cursorBlinkRate: 1000 }),
       EditorState.allowMultipleSelections.of(true),
+      EditorState.readOnly.of(mainView.state.readOnly),
+      EditorView.editable.of(!mainView.state.readOnly && mainView.state.facet(EditorView.editable)),
       // Add the configuration and preset it with whatever is in the main view.
       // The config field will automagically update since we forward any effects
       // to the subview.
       configField.init(_state => cfg),
+      htmlRendering.of(htmlExtensions(cfg)),
+      EditorState.transactionExtender.of(transaction => {
+        const configuration = transaction.state.field(configField)
+        const previous = transaction.startState.field(configField)
+        if (configuration.renderingMode !== previous.renderingMode || configuration.renderPandoc !== previous.renderPandoc) {
+          return { effects: htmlRendering.reconfigure(htmlExtensions(configuration)) }
+        }
+        return null
+      }),
       darkMode({ darkMode: useDarkModeEditor(cfg.darkMode, cfg.darkModeEditor), ...themes[cfg.theme] }),
       syntaxHighlighting(defaultHighlightStyle),
       markdownSyntaxHighlighter(),
@@ -298,6 +393,9 @@ export function createSubviewForCell (
       }),
       ensureBoundariesFilter,
       cellLineBreakPlugin,
+      freezeRevealDuringPointerSelection,
+      cellTaskField,
+      EditorView.domEventHandlers(mdTableImagePasteHandlers),
       EditorView.domEventHandlers(clickListeners())
     ]
   })
@@ -324,8 +422,8 @@ export function createSubviewForCell (
 export const subviewUpdatePlugin = ViewPlugin.define(view => ({
   update (u: ViewUpdate) {
     const cells = [
-      ...view.dom.querySelectorAll('.cm-table-editor-widget td'),
-      ...view.dom.querySelectorAll('.cm-table-editor-widget th')
+      ...view.dom.querySelectorAll(`.${TABLE_WIDGET_WRAPPER_CLASS} td`),
+      ...view.dom.querySelectorAll(`.${TABLE_WIDGET_WRAPPER_CLASS} th`)
     ] as HTMLTableCellElement[]
 
     for (const cell of cells) {

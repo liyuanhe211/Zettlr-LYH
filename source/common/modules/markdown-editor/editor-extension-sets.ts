@@ -16,14 +16,17 @@
  * END HEADER
  */
 
-import { closeBrackets } from '@codemirror/autocomplete'
+import { characterPairClosingExtension } from './plugins/character-pair-closing'
+import { mathDollarInputExtension } from './plugins/math-dollar-input'
+import { normalizeCharacterPairSettings } from './util/character-pair-policy'
 import { type Update } from '@codemirror/collab'
 import { defaultKeymap, history } from '@codemirror/commands'
 import { bracketMatching, codeFolding, foldGutter, foldKeymap, indentOnInput, indentUnit, StreamLanguage } from '@codemirror/language'
 import { stex } from '@codemirror/legacy-modes/mode/stex'
+import { toml } from '@codemirror/legacy-modes/mode/toml'
 import { yaml } from '@codemirror/lang-yaml'
 import { search, searchKeymap } from '@codemirror/search'
-import { Compartment, EditorState, Prec, type Extension } from '@codemirror/state'
+import { Compartment, EditorState, Prec, StateField, type Extension } from '@codemirror/state'
 import {
   drawSelection,
   EditorView,
@@ -35,6 +38,8 @@ import {
   type ViewUpdate,
   type DOMEventHandlers
 } from '@codemirror/view'
+import { Decoration } from '@codemirror/view'
+import { extractTOMLTableOfContents, type TOMLTableEntry } from '@common/util/toml-reading'
 import { autocomplete } from './autocomplete'
 import { codeSyntaxHighlighter, markdownSyntaxHighlighter } from './theme/syntax'
 import markdownParser from './parser/markdown-parser'
@@ -47,13 +52,16 @@ import { mdLint } from './linters/md-lint'
 import { countField, countPlugin } from './plugins/statistics-fields'
 import { tocField } from './plugins/toc-field'
 import { typewriter } from './plugins/typewriter'
-import { formattingToolbar, footnoteHover, filePreview, urlHover } from './tooltips'
+import { footnoteHover, filePreview, urlHover } from './tooltips'
 import { type EditorConfiguration, configField } from './util/configuration'
 import { highlightRanges } from './plugins/highlight-ranges'
 import { markdownFolding } from './code-folding/markdown'
 import { json, jsonParseLinter } from '@codemirror/lang-json'
 import { softwrapVisualIndent } from './plugins/visual-indent'
 import { backgroundLayers } from './plugins/code-background'
+import { inlineCodeWrap } from './plugins/inline-code-wrap'
+import { pathFolderButton } from './plugins/path-folder-button'
+import { bracketContentHighlight } from './plugins/bracket-content-highlight'
 import { emacs } from '@replit/codemirror-emacs'
 import { distractionFree } from './plugins/distraction-free'
 import { languageTool } from './linters/language-tool'
@@ -77,10 +85,21 @@ import { autocompleteTriggerCharacter } from './autocomplete/snippets'
 import { vimPlugin } from './plugins/vim-mode'
 import { projectInfoField } from './plugins/project-info-field'
 import { preserveScrollAnchor } from './plugins/preserve-scroll-anchor'
-import { headingGutter } from './renderers/render-headings'
+import { offscreenEditScroll } from './plugins/offscreen-edit-scroll'
+import { infiniteScroll } from './plugins/infinite-scroll'
+import { freezeRevealDuringPointerSelection } from './util/reveal-selection'
+import { balanceGutterWhitespace } from './plugins/balance-gutter-whitespace'
 import { citationTooltips } from './tooltips/citations'
 import { zettlrKeymap } from './keymaps'
 import { pptxPreviewPins } from './plugins/pptx-preview-pins'
+import { markdownSourceSelection } from './plugins/markdown-source-selection'
+import { tomlBackgroundParse } from './plugins/toml-background-parse'
+import { tomlShowTablesField, tomlShowTablesRegistration, tomlTableRender } from './plugins/toml-table-render'
+import { markdownVisibleCopy } from './plugins/markdown-visible-copy'
+import { trackChangesExtension } from './revisions/track-changes'
+import { trackChangesFromConfiguration } from './renderers/render-revisions'
+import { fenceCompletionExtension } from './autocomplete/code-blocks'
+import { xmlTagsExtension } from './plugins/xml-tags'
 
 /**
  * This interface describes the required properties which the extension sets
@@ -162,11 +181,6 @@ function getCoreExtensions (options: CoreExtensionOptions): Extension[] {
     inputMode.push(emacs())
   }
 
-  const autoCloseBracketsConfig: Extension[] = []
-  if (options.initialConfig.autoCloseBrackets) {
-    autoCloseBracketsConfig.push(closeBrackets())
-  }
-
   const themes = getMainEditorThemes()
 
   return [
@@ -181,7 +195,11 @@ function getCoreExtensions (options: CoreExtensionOptions): Extension[] {
     codeFolding(),
     Prec.low(foldGutter()), // The fold gutter should appear next to the text content
     // HISTORY
-    history(),
+    // Zettlr-LYH undo history (R135): 10,000 groups (CodeMirror starts to trim
+    // at the depth plus 20). The number equals UNDO_HISTORY_MAX_EVENTS of the
+    // main process; the renderer must not import main process modules at
+    // runtime, so the value is written out here.
+    history({ minDepth: 10000 }),
     // SELECTIONS
     // Overrides the default browser selection drawing, allows styling
     drawSelection({ drawRangeCursor: false, cursorBlinkRate: 1200 }),
@@ -202,7 +220,7 @@ function getCoreExtensions (options: CoreExtensionOptions): Extension[] {
     EditorState.tabSize.from(configField, (val) => val.indentUnit),
     indentUnit.from(configField, (val) => val.indentWithTabs ? '\t' : ' '.repeat(val.indentUnit)),
     EditorView.lineWrapping, // Enable line wrapping,
-    autoCloseBracketsConfig,
+    characterPairClosingExtension,
 
     // Allow configuration of the trigger character
     autocompleteTriggerCharacter.from(configField, val => val.snippetAutocompleteTriggerCharacter),
@@ -212,7 +230,10 @@ function getCoreExtensions (options: CoreExtensionOptions): Extension[] {
 
     // Add the configuration and preset it with whatever is in the cached
     // config.
-    configField.init(_state => JSON.parse(JSON.stringify(options.initialConfig))),
+    configField.init(_state => ({
+      ...JSON.parse(JSON.stringify(options.initialConfig)),
+      autoCloseCharacterPairs: normalizeCharacterPairSettings(options.initialConfig.autoCloseCharacterPairs, options.initialConfig.autoCloseBrackets)
+    })),
 
     // The updateListener is a custom extension we're using in order to be
     // able to emit events from this main class based on change events.
@@ -228,6 +249,12 @@ function getCoreExtensions (options: CoreExtensionOptions): Extension[] {
     // Keep the viewport visually stable when the display height changes
     // without the user scrolling (remote edits, widgets (re)rendering, ...)
     preserveScrollAnchor,
+    // Bring the cursor's row to one third of the visible height when the user
+    // modifies the document while the cursor is scrolled out of view
+    offscreenEditScroll,
+    // Keep rendered elements from switching to their source while the mouse
+    // drags a selection across them
+    freezeRevealDuringPointerSelection,
     highlightRanges
   ]
 }
@@ -326,12 +353,24 @@ export function getMarkdownExtensions (options: CoreExtensionOptions): Extension
     markdownParser({
       zknLinkParserConfig: { format: options.initialConfig.zknLinkFormat }
     }),
+    markdownSourceSelection, markdownVisibleCopy,
+    fenceCompletionExtension,
+    xmlTagsExtension,
+    // Zettlr-LYH (R175): "$" pairs, and "$" or "￥" wraps a selection as "$selection$"
+    mathDollarInputExtension,
+    // Zettlr-LYH (R84): Track Changes rewrites edits into tracked changes while
+    // `editor.trackChanges` is on. Only the main editor loads it; the table
+    // cell editors do not (spec C10).
+    trackChangesExtension(),
+    trackChangesFromConfiguration,
     // ... which can then be styled with a highlighter
     markdownSyntaxHighlighter(),
+    bracketContentHighlight,
     renderers(options.initialConfig),
     showLineNumbers(options.initialConfig.showMarkdownLineNumbers),
     mdLinterExtensions,
-    headingGutter,
+    infiniteScroll,
+    balanceGutterWhitespace, // Keeps the white space left and right of the text equally wide (R56)
     pptxPreviewPins, // Heading pins for the pandoc PPTX preview (hidden unless it is open)
     languageTool,
     // Some statistics we need for Markdown documents
@@ -344,13 +383,14 @@ export function getMarkdownExtensions (options: CoreExtensionOptions): Extension
     markdownFolding, // Should be before footnoteGutter
     autocomplete,
     readabilityMode,
-    formattingToolbar,
     footnoteHover,
     footnoteGutter, // Should be after markdownFolding
     urlHover,
     filePreview,
     citationTooltips,
     backgroundLayers, // Add a background behind inline code and code blocks
+    inlineCodeWrap, // Wrap inline code at any character
+    pathFolderButton, // Folder buttons after existing paths (R100, spec C12)
     defaultContextMenu, // A default context menu
     softwrapVisualIndent, // Always indent visually
     tagClasses(), // Apply a custom class to each tag so that users can style them (#4589)
@@ -406,6 +446,116 @@ export function getJSONExtensions (options: CoreExtensionOptions): Extension[] {
     json(),
     linter(jsonParseLinter())
   ]
+}
+
+/**
+ * Zettlr-LYH (R117, R124): the table headers of a TOML document with their
+ * one-indexed source lines and offsets, recomputed whenever the document
+ * changes. Both TOML view modes carry it: the MarkdownEditor publishes it as
+ * the table of contents, and the Formatted mode emphasizes the header lines.
+ */
+export const tomlTableOfContentsField = StateField.define<TOMLTableEntry[]>({
+  create: state => extractTOMLTableOfContents(state.doc.toString()),
+  update: (entries, transaction) => transaction.docChanged ? extractTOMLTableOfContents(transaction.state.doc.toString()) : entries
+})
+
+/**
+ * Zettlr-LYH (R124): holds the reading presentation of the TOML Formatted mode
+ * and is empty in the Raw Text mode. Switching modes reconfigures only this
+ * compartment, so the editor state with its document, selection, undo
+ * history and unsaved changes stays as it is.
+ *
+ * @var  {Compartment}
+ */
+export const tomlPresentationCompartment = new Compartment()
+
+/**
+ * Zettlr-LYH (R124): a line decoration on every table header line, derived
+ * from the table of contents field.
+ */
+const tomlTableHeadingDecorations = EditorView.decorations.compute([tomlTableOfContentsField], state => {
+  const lineCount = state.doc.lines
+  return Decoration.set(state.field(tomlTableOfContentsField)
+    .filter(entry => entry.line >= 1 && entry.line <= lineCount)
+    .map(entry => Decoration.line({ class: 'toml-table-heading' }).range(state.doc.line(entry.line).from)))
+})
+
+/**
+ * Zettlr-LYH (R124): the reading presentation of the TOML Formatted mode. It
+ * only decorates and never changes characters or line numbers: the text is
+ * limited in width and centered, the line height is 1.7, and table header
+ * lines get extra space, bold text and a background. Line wrapping comes
+ * with the core extensions of both modes. The document stays editable.
+ *
+ * @return  {Extension[]}  The presentation, to be placed into the compartment
+ */
+export function formattedTOMLPresentation (): Extension[] {
+  return [
+    tomlTableHeadingDecorations,
+    EditorView.theme({
+      '.cm-content': { padding: '16px 24px', lineHeight: '1.7', maxWidth: '1000px', margin: '0 auto', flex: '1' },
+      '.toml-table-heading': { paddingTop: '12px', paddingBottom: '6px', fontWeight: '700', backgroundColor: 'rgba(128, 128, 128, 0.12)', borderBottom: '1px solid currentColor' }
+    }),
+    // R128 (Show Tables): the grids of plugins/toml-table-render.ts (block
+    // replacement widgets) only exist in the Formatted mode. Whether they are
+    // shown is decided by the Show Tables state field of
+    // getTOMLLanguageExtensions, which is not part of this compartment and so
+    // keeps its value across mode switches.
+    tomlTableRender
+  ]
+}
+
+/**
+ * Zettlr-LYH (R124): the TOML specific extensions of both view modes, without
+ * the generic code extensions: the legacy TOML highlighter, the table of
+ * contents field, and the presentation compartment, which starts with the
+ * reading presentation if formatted is true and empty otherwise.
+ *
+ * @param   {boolean}      formatted  Whether to start in the Formatted mode
+ *
+ * @return  {Extension[]}             The TOML specific extensions
+ */
+export function getTOMLLanguageExtensions (formatted: boolean): Extension[] {
+  return [
+    StreamLanguage.define(toml),
+    tomlTableOfContentsField,
+    // R127: parses the document to its end in idle time, so that the
+    // highlighting is already there after jumping far away. Both modes carry it.
+    tomlBackgroundParse,
+    // R128: the global Show Tables setting of this editor, and the registration
+    // that hands later changes of it to this editor. Both modes carry them; the
+    // grids themselves belong to the presentation of the Formatted mode.
+    tomlShowTablesField,
+    tomlShowTablesRegistration,
+    tomlPresentationCompartment.of(formatted ? formattedTOMLPresentation() : [])
+  ]
+}
+
+/**
+ * This public function returns the extensions of the TOML Raw Text mode: the
+ * generic code extensions, the TOML highlighter and the table of contents,
+ * with an empty presentation compartment.
+ *
+ * @param   {CoreExtensionOptions}  options  The default options
+ *
+ * @return  {Extension[]}                    An array of options for TOML files
+ */
+export function getTOMLExtensions (options: CoreExtensionOptions): Extension[] {
+  return [ ...getGenericCodeExtensions(options), ...getTOMLLanguageExtensions(false) ]
+}
+
+/**
+ * Zettlr-LYH (R124): returns the extensions of the TOML Formatted mode, which
+ * equal those of the Raw Text mode plus the reading presentation. The
+ * document stays editable and is connected to the document authority, so
+ * saving, undo, backups and conflict handling work as in the Raw Text mode.
+ *
+ * @param   {CoreExtensionOptions}  options  The default options
+ *
+ * @return  {Extension[]}                    An array of options for TOML files
+ */
+export function getFormattedTOMLExtensions (options: CoreExtensionOptions): Extension[] {
+  return [ ...getGenericCodeExtensions(options), ...getTOMLLanguageExtensions(true) ]
 }
 
 /**
@@ -498,12 +648,16 @@ export function getReadOnlyMarkdownExtensions (config: EditorConfiguration, upda
     markdownParser({
       zknLinkParserConfig: { format: viewerConfig.zknLinkFormat }
     }),
+    markdownSourceSelection, markdownVisibleCopy,
     markdownSyntaxHighlighter(),
+    bracketContentHighlight,
     renderers(viewerConfig),
     tocField,
     markdownFolding,
     backgroundLayers,
+    inlineCodeWrap,
     softwrapVisualIndent,
-    preserveScrollAnchor
+    preserveScrollAnchor,
+    freezeRevealDuringPointerSelection
   ]
 }
