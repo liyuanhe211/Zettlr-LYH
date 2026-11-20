@@ -249,6 +249,12 @@ export default class DocumentBackupManager {
         const content = await fs.readFile(this._contentPathFor(filePath), 'utf-8')
         return { content, metadata }
       } catch (err: unknown) {
+        // Zettlr-LYH data loss prevention (R173, specification C21 section 4
+        // item 10): a backup that exists but cannot be read must leave a
+        // trace. A file without any backup does not get here; a missing
+        // metadata file is answered above.
+        const message = err instanceof Error ? err.message : String(err)
+        this._log.error(`[DocumentBackupManager] Could not read the backup for ${filePath}: ${message}`, err)
         return undefined
       }
     })
