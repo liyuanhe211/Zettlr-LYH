@@ -31,6 +31,45 @@ import { SpaceWidget } from '../renderers/render-emphasis'
 // not to induce any problems when adjusting the indentation
 const BASE_PADDING = 6
 
+/**
+ * Measure a formatting prefix at its natural width. The editor justifies
+ * Markdown lines, which can stretch the space after a list marker across most
+ * of a wrapped line. Existing hanging-indent styles must be removed during
+ * this measurement too, or each update would measure its own previous indent.
+ */
+export function measureNaturalVisualIndent (view: EditorView, lineFrom: number, contentStart: number): number|undefined {
+  const position = view.domAtPos(lineFrom)
+  const element = position.node instanceof HTMLElement ? position.node : position.node.parentElement
+  const lineElement = element?.closest<HTMLElement>('.cm-line')
+  if (lineElement === undefined || lineElement === null) {
+    return undefined
+  }
+
+  const style = lineElement.style
+  const properties = [ 'text-align', 'text-indent', 'padding-left' ] as const
+  const original = properties.map(property => ({
+    property,
+    value: style.getPropertyValue(property),
+    priority: style.getPropertyPriority(property)
+  }))
+  try {
+    style.setProperty('text-align', 'left')
+    style.setProperty('text-indent', '0px')
+    style.setProperty('padding-left', `${BASE_PADDING}px`)
+    const base = view.contentDOM.getBoundingClientRect().left
+    const after = view.coordsAtPos(contentStart)?.left
+    return after === undefined ? undefined : after - base
+  } finally {
+    for (const { property, value, priority } of original) {
+      if (value === '') {
+        style.removeProperty(property)
+      } else {
+        style.setProperty(property, value, priority)
+      }
+    }
+  }
+}
+
 // These regexes are used to determine indentation level
 // Leading whitespace characters
 const WHITESPACE_RE = /^([ \t]+)/
@@ -50,6 +89,12 @@ const tabReplaceDeco = new MatchDecorator({
   regexp: /\t/g,
   boundary: /[^\t]/g,
   decoration: (_match, view, _pos) => Decoration.replace({ widget: new SpaceWidget(view.state.tabSize) })
+})
+
+// Keeps the formatting prefix of a line (list marker, task checkbox and the
+// whitespace around them) at its natural width in justified text.
+const fixedWidthPrefixDeco = Decoration.mark({
+  attributes: { style: 'display: inline-block; white-space: pre; text-indent: 0; text-align: left;' }
 })
 
 function render (view: EditorView, measurements?: Map<string, number>): RangeSet<Decoration> {
@@ -100,14 +145,13 @@ function render (view: EditorView, measurements?: Map<string, number>): RangeSet
             folded.next()
           }
 
-          const base = view.contentDOM.getBoundingClientRect().left
-          const after = view.coordsAtPos(pos)?.left ?? 0
-          if (after === 0) {
+          const naturalIndent = measureNaturalVisualIndent(view, line.from, pos)
+          if (naturalIndent === undefined) {
             return // Could not retrieve coordinates
           }
           // Note that this continuously updates our measurements after any layout
           // changes
-          measurements?.set(measurementKey, after - base)
+          measurements?.set(measurementKey, naturalIndent)
         },
         key: measurementKey
       })
@@ -117,6 +161,21 @@ function render (view: EditorView, measurements?: Map<string, number>): RangeSet
         const deco = Decoration.line({ attributes: { style: `text-indent: -${indent-BASE_PADDING}px; padding-left: ${indent}px;` } })
         ranges.push(deco.range(line.from))
       }
+
+      // The editor justifies Markdown lines, which stretches every space on a
+      // wrapped line, including the ones between a list marker, a task
+      // checkbox and the first word. The first word would then no longer be
+      // aligned with the continuation lines, which start at the natural
+      // width of this prefix. An inline-block is atomic for justification,
+      // so the prefix keeps its natural width. It must not inherit the
+      // hanging indent of the line.
+      if (columnLineTextStart >= line.text.length) {
+        continue
+      }
+      if (QUOTEMARK_RE.test(line.text) && LISTMARK_RE.exec(line.text) === null) {
+        continue // Blockquote lines are laid out by the blockquote renderer
+      }
+      ranges.push(fixedWidthPrefixDeco.range(line.from, line.from + columnLineTextStart))
     }
 
   }

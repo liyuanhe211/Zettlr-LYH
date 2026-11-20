@@ -238,6 +238,15 @@ export const editorTheme = EditorView.baseTheme({
   '&.cm-focused .cm-scroller .cm-layer.cm-selectionLayer .cm-selectionBackground, ::selection': {
     background: 'var(--zettlr-editor-selection-color)',
   },
+  // Without focus (e.g., while a context menu is open), CodeMirror falls back
+  // to a grey that is indistinguishable from the background of inline code.
+  '.cm-scroller .cm-layer.cm-selectionLayer .cm-selectionBackground': {
+    background: 'var(--zettlr-editor-selection-color)',
+    opacity: '0.6'
+  },
+  '&.cm-focused .cm-scroller .cm-layer.cm-selectionLayer .cm-selectionBackground': {
+    opacity: '1'
+  },
   /**
    * Cursor blink animation.
    *
@@ -295,6 +304,11 @@ export const editorTheme = EditorView.baseTheme({
   },
   '.cm-escape': {
     color: 'var(--zettlr-editor-escape-color)',
+  },
+  // A backslash inside a word (e.g., in a Windows path) stays visible in the
+  // rendered text, and should not stand out from the rest of the word
+  '.cm-escape-literal, .cm-escape-literal .cm-escape': {
+    color: 'inherit',
   },
   '.blockquote-wrapper': {
     borderLeftColor: 'var(--zettlr-editor-primary-color)',
@@ -375,6 +389,9 @@ export const editorTheme = EditorView.baseTheme({
     color: 'var(--zettlr-editor-primary-color)',
     textDecoration: 'var(--zettlr-editor-line-decoration)',
   },
+  '.cm-bracket-content, .cm-bracket-content .cm-square-bracket, .cm-bracket-content.cm-square-bracket': {
+    color: 'var(--zettlr-editor-primary-color)',
+  },
   '.cm-string': {
     color: 'var(--zettlr-editor-secondary-color)',
   },
@@ -415,29 +432,29 @@ export const editorTheme = EditorView.baseTheme({
   },
   // Don't increase font-size within blockquotes
   '.cm-line:has(:not(.cm-quote).cm-header-1)': {
-    font: 'var(--zettlr-editor-header-style) var(--zettlr-editor-header-1-size) var(--zettlr-editor-font)',
+    font: 'var(--zettlr-editor-header-1-style, var(--zettlr-editor-header-style)) var(--zettlr-editor-header-1-size) var(--zettlr-editor-font)',
     // TODO: find a better way to override the `cm-code-mark` styling above
-    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-style)',
+    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-1-style, var(--zettlr-editor-header-style))',
   },
   '.cm-line:has(:not(.cm-quote).cm-header-2)': {
-    font: 'var(--zettlr-editor-header-style) var(--zettlr-editor-header-2-size) var(--zettlr-editor-font)',
-    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-style)',
+    font: 'var(--zettlr-editor-header-2-style, var(--zettlr-editor-header-style)) var(--zettlr-editor-header-2-size) var(--zettlr-editor-font)',
+    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-2-style, var(--zettlr-editor-header-style))',
   },
   '.cm-line:has(:not(.cm-quote).cm-header-3)': {
-    font: 'var(--zettlr-editor-header-style) var(--zettlr-editor-header-3-size) var(--zettlr-editor-font)',
-    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-style)',
+    font: 'var(--zettlr-editor-header-3-style, var(--zettlr-editor-header-style)) var(--zettlr-editor-header-3-size) var(--zettlr-editor-font)',
+    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-3-style, var(--zettlr-editor-header-style))',
   },
   '.cm-line:has(:not(.cm-quote).cm-header-4)': {
-    font: 'var(--zettlr-editor-header-style) var(--zettlr-editor-header-4-size) var(--zettlr-editor-font)',
-    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-style)',
+    font: 'var(--zettlr-editor-header-4-style, var(--zettlr-editor-header-style)) var(--zettlr-editor-header-4-size) var(--zettlr-editor-font)',
+    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-4-style, var(--zettlr-editor-header-style))',
   },
   '.cm-line:has(:not(.cm-quote).cm-header-5)': {
-    font: 'var(--zettlr-editor-header-style) var(--zettlr-editor-header-5-size) var(--zettlr-editor-font)',
-    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-style)',
+    font: 'var(--zettlr-editor-header-5-style, var(--zettlr-editor-header-style)) var(--zettlr-editor-header-5-size) var(--zettlr-editor-font)',
+    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-5-style, var(--zettlr-editor-header-style))',
   },
   '.cm-line:has(:not(.cm-quote).cm-header-6)': {
-    font: 'var(--zettlr-editor-header-style) var(--zettlr-editor-header-6-size) var(--zettlr-editor-font)',
-    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-style)',
+    font: 'var(--zettlr-editor-header-6-style, var(--zettlr-editor-header-style)) var(--zettlr-editor-header-6-size) var(--zettlr-editor-font)',
+    '--zettlr-editor-code-style': 'var(--zettlr-editor-header-6-style, var(--zettlr-editor-header-style))',
   },
   // Admonitions (generic styles)
   '.cm-admonition-title': { fontWeight: 'bold' }
