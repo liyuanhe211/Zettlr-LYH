@@ -109,7 +109,7 @@ export const handleReplacement: Command = (target: EditorView): boolean => {
   if (changes.length > 0) {
     // Isolate the transaction in the undo-history so that a user
     // can override the replacement without removed the space/newline
-    target.dispatch({ changes, annotations: isolateHistory.of('full') })
+    target.dispatch({ changes, annotations: isolateHistory.of('full'), scrollIntoView: true })
 
     // Indicate a replacement happened
     return true
@@ -122,7 +122,7 @@ export const handleReplacement: Command = (target: EditorView): boolean => {
 export const handleAutocorrectSpace: Command = (target: EditorView) => {
   // By dispatching the Space transaction first, the replacement
   // appears after it in the undo history, providing better undo UX.
-  target.dispatch(target.state.replaceSelection(' '))
+  target.dispatch({ ...target.state.replaceSelection(' '), scrollIntoView: true })
 
   handleReplacement(target)
 
@@ -191,7 +191,7 @@ export function handleBackspace (view: EditorView): boolean {
   }
 
   if (changes.length > 0) {
-    view.dispatch({ changes })
+    view.dispatch({ changes, scrollIntoView: true })
   }
 
   return changes.length > 0 // If we've replaced a quote, we must stop Codemirror from removing it
@@ -258,7 +258,7 @@ export function handleQuote (quote: string): Command {
       }
     })
 
-    view.dispatch(transaction)
+    view.dispatch({ ...transaction, scrollIntoView: true })
 
     return true
   }
