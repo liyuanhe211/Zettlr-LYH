@@ -19,7 +19,7 @@ import { isAbsolutePath, resolvePath } from '@common/util/renderer-path-polyfill
 import { CITEPROC_MAIN_DB } from '@dts/common/citeproc'
 import { DP_EVENTS } from '@dts/common/documents'
 import { type AnyDescriptor, type MDFileDescriptor } from '@dts/common/fsal'
-import { onMounted, ref, computed, watch } from 'vue'
+import { onMounted, onBeforeUnmount, ref, computed, watch } from 'vue'
 import { type DocumentsUpdateContext } from 'source/app/service-providers/documents'
 import { useDocumentTreeStore } from 'source/pinia'
 import type { CiteprocProviderIPCAPI } from 'source/app/service-providers/citeproc'
@@ -85,8 +85,20 @@ watch(activeFile, () => {
   updateBibliography().catch(e => console.error('Could not update bibliography', e))
 })
 
+// Zettlr-LYH data loss prevention (R173, specification C21 section 2): the
+// listener is removed again when the component goes away. A listener that
+// outlives its component keeps running on every document event, and fails
+// there once the component's state is gone.
+let stopDocumentsUpdateListener: (() => void)|undefined
+
+onBeforeUnmount(() => {
+  stopDocumentsUpdateListener?.()
+  stopDocumentsUpdateListener = undefined
+})
+
 onMounted(() => {
-  ipcRenderer.on('documents-update', (e, payload: { event: DP_EVENTS, context: DocumentsUpdateContext }) => {
+  stopDocumentsUpdateListener?.()
+  stopDocumentsUpdateListener = ipcRenderer.on('documents-update', (e, payload: { event: DP_EVENTS, context: DocumentsUpdateContext }) => {
     const { event, context } = payload
     // Update the bibliography if the active file has been saved
     if (event === DP_EVENTS.FILE_SAVED) {

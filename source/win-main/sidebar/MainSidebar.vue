@@ -1,10 +1,10 @@
 <template>
   <div id="sidebar">
-    <TabBar
-      v-bind:tabs="tabs"
-      v-bind:current-tab="currentTab"
-      v-on:tab="setCurrentTab($event)"
-    ></TabBar>
+    <SidebarSegmentBar
+      v-bind:segments="tabs"
+      v-bind:current-id="currentTab"
+      v-on:select="setCurrentTab($event)"
+    ></SidebarSegmentBar>
 
     <!-- Now the tab containers -->
     <div id="sidebar-tab-container">
@@ -36,7 +36,7 @@
  */
 
 import { trans } from '@common/i18n-renderer'
-import TabBar from '@common/vue/TabBar.vue'
+import SidebarSegmentBar, { type SidebarSegment } from './SidebarSegmentBar.vue'
 import { computed } from 'vue'
 import ToCTab from './ToCTab.vue'
 import ReferencesTab from './ReferencesTab.vue'
@@ -53,30 +53,27 @@ const emit = defineEmits<{
 
 const currentTab = computed(() => configStore.config.window.currentSidebarTab)
 
-const tabs = [
+// R111: text buttons of a segmented control instead of icons
+const tabs: SidebarSegment[] = [
   {
-    icon: 'indent',
     id: 'toc',
     target: 'sidebar-toc',
-    label: trans('Table of contents')
+    label: trans('Outline')
   },
   {
-    icon: 'book',
     id: 'references',
     target: 'sidebar-bibliography',
     label: trans('References')
   },
   {
-    icon: 'file-group',
     id: 'relatedFiles',
     target: 'sidebar-related-files',
-    label: trans('Related files')
+    label: trans('Related')
   },
   {
-    icon: 'paperclip',
     id: 'attachments',
     target: 'sidebar-files',
-    label: trans('Other files')
+    label: trans('Attachments')
   }
 ]
 
@@ -92,8 +89,12 @@ body {
   @button-size: 5px;
   @button-icon-size: 5px;
 
+  // R111: the colours of the PyQt6 design language: a light grey frame, a white
+  // content panel below a thin divider, no rounded corners or shadows
   #sidebar {
-    background-color: rgb(230, 230, 230);
+    background-color: #f5f6f8;
+    color: #1f2227;
+    font-family: system-ui, "Microsoft YaHei UI", sans-serif;
     height: 100%;
     width: 100%;
     overflow: hidden;
@@ -101,8 +102,11 @@ body {
     flex-direction: column;
 
     #sidebar-tab-container {
+      flex: 1 1 auto;
+      min-height: 0;
       padding: 10px;
       overflow-y: auto;
+      background-color: #ffffff;
     }
 
     #open-dir-external {
@@ -130,9 +134,13 @@ body {
       display: flex;
       margin-bottom: 10px;
 
+      // The list marker of the entry (R110): one character, centred in a
+      // fixed width so that the texts of one level start in one column
       div.toc-level {
-        flex-shrink: 1;
-        padding: 0px 5px;
+        flex-shrink: 0;
+        width: 1em;
+        padding: 0px 4px 0px 0px;
+        text-align: center;
         font-weight: bold;
         color: var(--system-accent-color, --c-primary);
       }
@@ -190,6 +198,8 @@ body {
     #sidebar {
       background-color: rgba(30, 30, 30, 1);
       color: rgb(230, 230, 230);
+
+      #sidebar-tab-container { background-color: rgba(30, 30, 30, 1); }
 
       div.related-files-container div.related-file:hover {
         background-color: rgb(80, 80, 80);
