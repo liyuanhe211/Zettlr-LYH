@@ -1,18 +1,11 @@
 <template>
-  <div
-    ref="pdfViewerContainer"
-    class="pdf-viewer-container"
-    role="region"
-    v-bind:aria-label="`PDFViewer: Currently viewing file ${pathBasename(props.file.path)}`"
-    v-on:pointerenter="acceptsClicks = true"
-    v-on:pointerleave="acceptsClicks = false"
-  >
-    <iframe
-      ref="iframe"
-      v-bind:src="makeValidUri(props.file.path)" view="Fit"
-      v-bind:class="{ 'pointer-events': acceptsClicks }"
-    ></iframe>
-  </div>
+  <PdfJsViewer
+    v-bind:leaf-id="props.leafId"
+    v-bind:window-id="props.windowId"
+    v-bind:active-file="props.activeFile"
+    v-bind:editor-commands="props.editorCommands"
+    v-bind:file="props.file"
+  ></PdfJsViewer>
 </template>
 
 <script setup lang="ts">
@@ -25,24 +18,17 @@
  * Maintainer:      Hendrik Erz
  * License:         GNU GPL v3
  *
- * Description:     The PDF Viewer is a component that can be mounted into
- *                  editor panes to display PDF files, using Chromium's built-in
- *                  PDF viewer. NOTE that due to the way iframes work, we have
- *                  to manually enable and disable pointer events. Were we not
- *                  doing this, the iframes could "swallow" drag events, making
- *                  resizing of the editor panes using the resizer bars
- *                  cumbersome. Right now, you "activate" iframes by clicking on
- *                  them, and disable them by focusing literally any other
- *                  element on the side. A faint outline/border indicates the
- *                  status.
+ * Description:     The PDF Viewer is the component that editor panes mount to
+ *                  display PDF files. Zettlr-LYH R59: it no longer embeds
+ *                  Chromium's built-in viewer in an iframe; it only hands its
+ *                  properties on to PdfJsViewer, the read-only viewer built on
+ *                  pdf.js (contract C5), so that EditorPane stays unchanged.
  *
  * END HEADER
  */
 import type { OpenDocument } from 'source/types/common/documents'
 import type { EditorCommands } from '../App.vue'
-import makeValidUri from 'source/common/util/make-valid-uri'
-import { ref } from 'vue'
-import { pathBasename } from 'source/common/util/renderer-path-polyfill'
+import PdfJsViewer from './pdf-viewer/PdfJsViewer.vue'
 
 const props = defineProps<{
   leafId: string
@@ -51,29 +37,4 @@ const props = defineProps<{
   editorCommands: EditorCommands
   file: OpenDocument
 }>()
-
-const iframe = ref<HTMLIFrameElement|null>(null)
-const pdfViewerContainer = ref<HTMLDivElement|null>(null)
-const acceptsClicks = ref(false)
-
 </script>
-
-<style lang="css" scoped>
-div.pdf-viewer-container {
-  width: 100%;
-  height: 100%;
-  user-select: auto;
-  overflow: hidden;
-
-  iframe {
-    width: 100%;
-    height: 100%;
-    border: none;
-    pointer-events: none;
-
-    &.pointer-events {
-      pointer-events: auto;
-    }
-  }
-}
-</style>

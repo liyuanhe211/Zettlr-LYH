@@ -4,12 +4,30 @@
     class="main-editor-wrapper"
     role="region"
     v-bind:aria-label="`Markdown Editor: Currently editing file ${pathBasename(props.file.path)}`"
-    v-bind:style="{ 'font-size': `${fontSize}px` }"
+    v-bind:style="{
+      'font-size': `${fontSize}px`,
+      '--editor-base-font-size': `${fontSize}px`,
+      '--zettlr-line-number-font-size': `${lineNumberFontSize}px`,
+      '--zettlr-editor-margin': `${editorMargin}px`
+    }"
     v-bind:class="{
       'code-file': !isMarkdown,
-      fullscreen: distractionFree
+      fullscreen: distractionFree,
+      'has-recovery-notice': recoverableSessions.length > 0
     }"
+    v-on:wheel="handleZoomWheel"
   >
+    <!-- Zettlr-LYH data loss prevention (R173): input that never reached this document; one session at a time -->
+    <RecoveryNotice
+      v-if="recoverableSessions.length > 0"
+      v-bind:key="recoverableSessions[0].sessionId"
+      v-bind:last-step-at="recoverableSessions[0].lastStepAt"
+      v-bind:busy="recoveryActionRunning"
+      v-bind:error-message="recoveryActionError"
+      v-on:restore="settleRecoverableSession('restore')"
+      v-on:keep-as-file="settleRecoverableSession('keep-as-file')"
+      v-on:discard="settleRecoverableSession('discard')"
+    ></RecoveryNotice>
     <div v-bind:id="`cm-text-${props.leafId}`">
       <!-- This element will be replaced with Codemirror's wrapper element on mount -->
     </div>
@@ -42,14 +60,19 @@
  * END HEADER
  */
 
-import MarkdownEditor, { type EditorViewPersistentState } from '@common/modules/markdown-editor'
+import MarkdownEditor, { type EditorViewPersistentState, type JumpPosition } from '@common/modules/markdown-editor'
 
-import { ref, computed, onMounted, onBeforeUnmount, watch, toRef, onUpdated } from 'vue'
+import { ref, computed, inject, onMounted, onBeforeUnmount, watch, toRef, defineAsyncComponent } from 'vue'
 import { type EditorCommands } from './App.vue'
+import { type JevSearchHighlightRequest } from '@common/modules/jev-search'
+import { clearJevSearchHighlight, showJevSearchHighlight } from '@common/modules/markdown-editor/plugins/jev-search-highlight'
+import { resolveLineNumberFontSize } from '@common/modules/markdown-editor/plugins/line-numbers'
 import { hasMarkdownExt } from '@common/util/file-extention-checks'
 import { DP_EVENTS, type OpenDocument } from '@dts/common/documents'
 import { CITEPROC_MAIN_DB } from '@dts/common/citeproc'
 import { type EditorConfigOptions } from '@common/modules/markdown-editor/util/configuration'
+import type { ColorProperty } from '@common/modules/markdown-editor/util/text-color-span'
+import { normalizeCharacterPairSettings } from '@common/modules/markdown-editor/util/character-pair-policy'
 import type { CodeFileDescriptor, DirDescriptor, MDFileDescriptor } from '@dts/common/fsal'
 import { getBibliographyForDescriptor as getBibliography } from '@common/util/get-bibliography-for-descriptor'
 import { EditorSelection } from '@codemirror/state'
@@ -62,6 +85,10 @@ import type { ProjectInfo } from 'source/common/modules/markdown-editor/plugins/
 import type { FileContentSearchResult } from 'source/app/service-providers/search'
 import type { CustomEditorShortcut } from 'source/common/modules/markdown-editor/keymaps/shortcuts'
 import getDocumentTitle from './util/get-document-title'
+import { useEditorFontZoom } from './util/use-editor-font-zoom'
+import { registerEditorPaneReadingCapture, storeEditorPaneReadingState } from './util/editor-pane-reading-state'
+import { effectiveEditorMargin, isSplitLayout, storedEditorMargin } from './util/editor-margin'
+import { CONFLICT_READ_ONLY_REGISTRY_KEY, setOriginalEditorConflictReadOnly, type ConflictReadOnlyRegistry } from './util/conflict-read-only'
 import PopoverPandocAttributes from './PopoverPandocAttributes.vue'
 import type { PandocAttributeTarget, PandocAttributeTargetKind } from '@common/pandoc-util/pandoc-attribute-schema'
 import {
@@ -69,6 +96,14 @@ import {
   type PandocAttributeKindUpdate,
   type PandocAttributesEventDetail
 } from '@common/modules/markdown-editor/context-menu/pandoc-attribute-menu'
+import type { RecoverableSession } from 'source/app/service-providers/recovery-journal/journal-store'
+
+// Zettlr-LYH data loss prevention (R173): the notice is loaded when it is first
+// shown, not with a static import. Several tests evaluate this component with
+// a fixed list of the modules it may import, and they have to keep passing
+// unchanged. The "eager" mode keeps the notice in the same bundle, so showing
+// it does not depend on loading anything.
+const RecoveryNotice = defineAsyncComponent(async () => await import(/* webpackMode: "eager" */ './RecoveryNotice.vue'))
 
 const ipcRenderer = window.ipc
 
@@ -94,9 +129,20 @@ const props = defineProps<{
   distractionFree: boolean
   file: OpenDocument
   persistentStateMap: Map<string, EditorViewPersistentState>
+  /**
+   * Zettlr-LYH (R124): the view mode of a TOML file, set by the mode bar of
+   * the editor pane; undefined for every other file. Switching it changes
+   * only the presentation of the same editor, which is not remounted.
+   */
+  tomlViewMode?: 'formatted'|'raw'
 }>()
 
-const emit = defineEmits<(e: 'globalSearch', query: string) => void>()
+const emit = defineEmits<{
+  (e: 'globalSearch', query: string): void
+  // Zettlr-LYH undo history (R135): an undo took back the reload of an external
+  // modification, so that the pane can say so
+  (e: 'undidReloadFromDisk'): void
+}>()
 
 const windowStateStore = useWindowStateStore()
 const documentTreeStore = useDocumentTreeStore()
@@ -104,11 +150,78 @@ const workspaceStore = useWorkspaceStore()
 const configStore = useConfigStore()
 const tagStore = useTagsStore()
 
+// Zooms the editor font size with Ctrl plus the mouse wheel (R41)
+const { handleZoomWheel } = useEditorFontZoom()
+
 // UNREFFED STUFF
 let currentEditor: MarkdownEditor|null = null
 
+// Zettlr-LYH disk conflicts (R138): while any window compares the file with
+// the version on disk, every original editor of the file is read-only.
+// The one in the pane that shows the comparison lies beneath it; the others
+// show a hint above them (EditorPane.vue). The editor reapplies the mode each
+// time it replaces its state (a reload after the comparison, a first load).
+const conflictReadOnlyRegistry = inject<ConflictReadOnlyRegistry|undefined>(CONFLICT_READ_ONLY_REGISTRY_KEY, undefined)
+const conflictReadOnly = computed<boolean>(() => conflictReadOnlyRegistry?.isReadOnly(props.file.path) === true)
+watch(conflictReadOnly, readOnly => {
+  if (currentEditor !== null) {
+    setOriginalEditorConflictReadOnly(currentEditor.instance, readOnly)
+  }
+}, { flush: 'sync' })
+function captureReadingState (): void {
+  if (currentEditor !== null) {
+    const persistentState = currentEditor.persistentState
+    if (persistentState !== undefined) {
+      storeEditorPaneReadingState(props.windowId, props.leafId, captureReadingState, currentEditor.documentPath, persistentState)
+    }
+  }
+}
+const stopReadingCapture = registerEditorPaneReadingCapture(props.windowId, props.leafId, captureReadingState, props.file.path)
+
+// Zettlr-LYH (R98): the main process keeps the last reading position of every
+// text file (the line at the top of the viewport and the pixels below its top),
+// so that the file opens where the reader stopped, also after a restart, in
+// another window and in another pane. The reading state in memory (R75) wins
+// where it exists.
+/**
+ * Asks the main process where the reader stopped in a file the last time.
+ *
+ * @param   {string}            filePath  The absolute path to the file
+ *
+ * @return  {Promise<unknown>}            The record: the position, null if the
+ *                                        file has none, or an error object
+ */
+function readStoredTextReadingPosition (filePath: string): Promise<unknown> {
+  return ipcRenderer.invoke('application', { command: 'get-text-reading-position', payload: { filePath } })
+}
+
+/**
+ * Hands the reading position of the current editor to the main process, unless
+ * the editor does not know it yet (not loaded, not displayed, or a position is
+ * still waiting to be applied). Called when the editor goes away and when the
+ * reader stopped scrolling.
+ */
+function storeTextReadingPosition (): void {
+  if (currentEditor === null) {
+    return
+  }
+  try {
+    const position = currentEditor.persistableTextReadingPosition
+    if (position !== undefined) {
+      ipcRenderer.invoke('application', {
+        command: 'set-text-reading-position',
+        payload: { filePath: currentEditor.documentPath, line: position.line, offset: position.offset }
+      }).catch(err => console.error(err))
+    }
+  } catch (err) {
+    // Storing a position must never keep the editor from going away
+    console.error(err)
+  }
+}
+let unmounted = false
+
 // EVENT LISTENERS
-ipcRenderer.on('citeproc-database-updated', (_event, _dbPath: string) => {
+const stopCitationUpdates = ipcRenderer.on('citeproc-database-updated', (_event, _dbPath: string) => {
   const descriptor = activeFileDescriptor.value
 
   if (descriptor === undefined || descriptor.type !== 'file') {
@@ -121,7 +234,7 @@ ipcRenderer.on('citeproc-database-updated', (_event, _dbPath: string) => {
   })
 })
 
-ipcRenderer.on('shortcut', (event, command) => {
+const stopShortcuts = ipcRenderer.on('shortcut', (event, command) => {
   if (currentEditor?.hasFocusWithin() !== true) {
     return // None of our business
   }
@@ -138,6 +251,14 @@ ipcRenderer.on('shortcut', (event, command) => {
         }
       })
       .catch(e => console.error(e))
+  } else if (command === 'save-file-as') {
+    // Zettlr-LYH save as (R48): main asks for the new name and lets the tab
+    // follow the file; false merely means the user cancelled or was refused
+    ipcRenderer.invoke('documents-provider', {
+      command: 'save-file-as',
+      payload: { path: props.file.path }
+    } as DocumentManagerIPCAPI)
+      .catch(e => console.error(e))
   } else if (command === 'search') {
     currentEditor.toggleSearchPanel()
   } else if (command === 'toggle-typewriter-mode') {
@@ -149,7 +270,7 @@ ipcRenderer.on('shortcut', (event, command) => {
   }
 })
 
-ipcRenderer.on('documents-update', (e, payload: { event: DP_EVENTS, context: DocumentsUpdateContext }) => {
+const stopDocumentUpdates = ipcRenderer.on('documents-update', (e, payload: { event: DP_EVENTS, context: DocumentsUpdateContext }) => {
   const { event, context } = payload
   if (event === DP_EVENTS.FILE_REMOTELY_CHANGED && context.filePath === props.file.path) {
     // The currently loaded document has been changed remotely. This event indicates
@@ -161,6 +282,9 @@ ipcRenderer.on('documents-update', (e, payload: { event: DP_EVENTS, context: Doc
     // descriptor to know of, e.g., library changes.
     ipcRenderer.invoke('fsal', { command: 'get-descriptor', payload: props.file.path })
       .then((descriptor: MDFileDescriptor|CodeFileDescriptor|undefined) => {
+        if (unmounted) {
+          return
+        }
         if (descriptor === undefined) {
           throw new Error(`Could not swap document: Could not retrieve descriptor for path ${props.file.path}!`)
         }
@@ -184,12 +308,12 @@ ipcRenderer.on('documents-update', (e, payload: { event: DP_EVENTS, context: Doc
   }
 })
 
-ipcRenderer.on('reload-editors', _e => {
+const stopEditorReloads = ipcRenderer.on('reload-editors', _e => {
   currentEditor?.reload().catch(err => console.error('Failed to reload editor after `reload-editors` event', err))
 })
 
 // Update the file database whenever links have been updated
-ipcRenderer.on('links', _e => {
+const stopLinkUpdates = ipcRenderer.on('links', _e => {
   updateFileDatabase().catch(err => console.error('Could not update file database', err))
 })
 
@@ -198,50 +322,203 @@ onMounted(() => {
   loadDocument().catch(err => console.error(err))
   // "Edit All…" in the Pandoc section of the editor's context menus
   mainEditorWrapper.value?.addEventListener(PANDOC_ATTRIBUTES_EVENT, onPandocAttributesRequest)
+  startEditorGeometryObserver()
 })
 
 onBeforeUnmount(() => {
+  unmounted = true
+  stopCitationUpdates()
+  stopShortcuts()
+  stopDocumentUpdates()
+  stopEditorReloads()
+  stopLinkUpdates()
   mainEditorWrapper.value?.removeEventListener(PANDOC_ATTRIBUTES_EVENT, onPandocAttributesRequest)
+  editorGeometryObserver?.disconnect()
+  editorGeometryObserver = null
+  if (editorGeometryFrame !== null) {
+    cancelAnimationFrame(editorGeometryFrame)
+    editorGeometryFrame = null
+  }
+  observedGutters = null
   clearTimeout(pandocPanelRefreshTimeout)
   pandocPanel.value = null
+  captureReadingState()
+  storeTextReadingPosition()
+  stopReadingCapture()
+  // Zettlr-LYH (R112): a reading line of this editor no longer applies
+  const readingLine = windowStateStore.readingLine
+  if (readingLine !== undefined && readingLine.leafId === props.leafId && readingLine.filePath === props.file.path) {
+    windowStateStore.readingLine = undefined
+  }
   if (currentEditor !== null) {
-    props.persistentStateMap.set(props.file.path, currentEditor.persistentState)
     // Clear out the table of contents before unmounting the component.
     windowStateStore.tableOfContents = undefined
     currentEditor.unmount()
-  }
-})
-
-onUpdated(() => {
-  // We hook into the onUpdated lifecycle event since that will fire when the
-  // data for this component update, which includes visibility with the v-show
-  // directive. In case that the editor component is mounted and non-hidden, we
-  // will fire
-  if (currentEditor === null) {
-    return
-  }
-
-  const currentFilePath = currentEditor.documentPath
-  if (currentFilePath !== props.activeFile?.path) {
-    // File path has changed -> unmount and remount (duplicate code from
-    // onMounted and onBeforeUnmount hooks).
-    props.persistentStateMap.set(currentFilePath, currentEditor.persistentState)
-    currentEditor.unmount()
-    loadDocument().catch(err => console.error(err))
-  }
-
-  if (!currentEditor.hasFocus()) {
-    currentEditor.focus()
+    currentEditor = null
   }
 })
 
 // DATA SETUP
 const mainEditorWrapper = ref<HTMLDivElement|null>(null)
 
+// Zettlr-LYH data loss prevention (R173, specification C21 section 6): the
+// sessions of this file whose input never reached the document, as the editor
+// announced them after its last load, the newest first. The notice above the
+// editor shows the first one and stays until the user has chosen what happens
+// to it; then the next one is shown.
+const recoverableSessions = ref<RecoverableSession[]>([])
+const recoveryActionRunning = ref(false)
+const recoveryActionError = ref<string|undefined>(undefined)
+
+/**
+ * Opens a recovery copy in a new tab of this pane.
+ *
+ * @param  {string}  path  The absolute path of the recovery copy
+ */
+async function openRecoveryCopy (path: string): Promise<void> {
+  await ipcRenderer.invoke('documents-provider', {
+    command: 'open-file',
+    payload: { path, windowId: props.windowId, leafId: props.leafId, newTab: true }
+  } as DocumentManagerIPCAPI)
+}
+
+/**
+ * Carries out what the user chose in the recovery notice for the session it
+ * shows. The session leaves the list once the choice has been carried out; if
+ * that fails, the notice stays and says so.
+ *
+ * @param  {'restore'|'keep-as-file'|'discard'}  choice  The button the user clicked
+ */
+function settleRecoverableSession (choice: 'restore'|'keep-as-file'|'discard'): void {
+  const editor = currentEditor
+  if (editor === null || recoverableSessions.value.length === 0 || recoveryActionRunning.value) {
+    return
+  }
+
+  const session = recoverableSessions.value[0]
+  let action: Promise<unknown>
+  if (choice === 'restore') {
+    action = editor.restoreRecoverableSession(session)
+  } else if (choice === 'keep-as-file') {
+    action = editor.keepRecoverableSessionAsFile(session, openRecoveryCopy)
+  } else {
+    action = editor.discardRecoverableSession(session)
+  }
+
+  recoveryActionRunning.value = true
+  action
+    .then(() => {
+      recoveryActionError.value = undefined
+      recoverableSessions.value = recoverableSessions.value.filter(candidate => candidate.sessionId !== session.sessionId)
+    })
+    .catch(err => {
+      console.error(`Could not ${choice} the recoverable session ${session.sessionId} of ${props.file.path}`, err)
+      recoveryActionError.value = 'Could not complete this action. Please try again.'
+    })
+    .finally(() => { recoveryActionRunning.value = false })
+}
+
+// Zettlr-LYH (R81): the left and right margin of the text. The toolbar's
+// Margin control stores one value for a single pane and one for split panes;
+// while it is being dragged, the preview of this window applies instead. The
+// margin is reduced to what the width of this pane allows (at least 200 px of
+// text), which needs the client width of the scroller and the width of the
+// gutters before the text; a ResizeObserver keeps both up to date. The CSS
+// rules of code files and of the distraction free mode ignore the value.
+const paneScrollerWidth = ref(0)
+const paneGutterWidth = ref(0)
+let editorGeometryObserver: ResizeObserver|null = null
+let editorGeometryFrame: number|null = null
+let observedGutters: HTMLElement|null = null
+
+const requestedEditorMargin = computed<number>(() => {
+  const split = isSplitLayout(documentTreeStore.paneStructure)
+  const preview = windowStateStore.editorMarginPreview
+  if (preview?.split === split) {
+    return preview.value
+  }
+  return storedEditorMargin(configStore.config.display, split)
+})
+
+const editorMargin = computed<number>(() => {
+  // A pane that is not laid out (e.g., a hidden tab) has no width yet; it
+  // gets limited once it is shown and measured
+  if (paneScrollerWidth.value <= 0) {
+    return requestedEditorMargin.value
+  }
+  return effectiveEditorMargin(requestedEditorMargin.value, paneScrollerWidth.value, paneGutterWidth.value)
+})
+
+/**
+ * Zettlr-LYH (R81): measures the client width of the editor's scroller and the
+ * width of the gutters before the text, and makes sure that the observer
+ * watches the current gutter container. The two measured widths do not depend
+ * on the margin, so the measurement does not feed back into itself. The margin
+ * that follows from them is written to the padding of the scroller, though,
+ * and that changes the content box which other observers (CodeMirror's DOM
+ * observer and the line number, code block and gutter whitespace plugins) are
+ * watching. The observer therefore does not call this function synchronously;
+ * see scheduleEditorGeometryMeasurement().
+ */
+function measureEditorGeometry (): void {
+  const wrapper = mainEditorWrapper.value
+  const scroller = wrapper?.querySelector<HTMLElement>(':scope > .cm-editor > .cm-scroller') ?? null
+  const gutters = scroller?.querySelector<HTMLElement>(':scope > .cm-gutters.cm-gutters-before') ?? null
+
+  if (editorGeometryObserver !== null && gutters !== observedGutters) {
+    if (observedGutters !== null) {
+      editorGeometryObserver.unobserve(observedGutters)
+    }
+    observedGutters = gutters
+    if (gutters !== null) {
+      editorGeometryObserver.observe(gutters)
+    }
+  }
+
+  paneScrollerWidth.value = scroller?.clientWidth ?? 0
+  paneGutterWidth.value = gutters?.offsetWidth ?? 0
+}
+
+/**
+ * Zettlr-LYH (R81): measures the geometry of the editor in the next animation
+ * frame, once for any number of calls until then. A new margin changes the
+ * content box of the scroller, which shallower elements than the observed
+ * gutters hold observers on; if the margin were changed inside the same
+ * observer loop (the observer callback and the update that Vue runs in a
+ * microtask after it), the browser would skip their notifications until the
+ * next frame and report "ResizeObserver loop completed with undelivered
+ * notifications". In an animation frame callback, the margin changes before
+ * the layout of that frame, and all observers are notified of the new size
+ * regularly. The margin follows the widths one frame (about 16 ms) later.
+ */
+function scheduleEditorGeometryMeasurement (): void {
+  if (editorGeometryFrame !== null) {
+    return
+  }
+  editorGeometryFrame = requestAnimationFrame(() => {
+    editorGeometryFrame = null
+    measureEditorGeometry()
+  })
+}
+
+/**
+ * Zettlr-LYH (R81): starts observing the size of the editor wrapper, which
+ * follows the width of the pane, and of the gutters, which follow the font
+ * size. Without a ResizeObserver, the margin is not limited.
+ */
+function startEditorGeometryObserver (): void {
+  if (typeof ResizeObserver === 'undefined' || mainEditorWrapper.value === null) {
+    return
+  }
+  editorGeometryObserver = new ResizeObserver(() => { scheduleEditorGeometryMeasurement() })
+  editorGeometryObserver.observe(mainEditorWrapper.value)
+}
+
 // COMPUTED PROPERTIES
 const useH1 = computed<boolean>(() => configStore.config.fileNameDisplay.includes('heading'))
 const useTitle = computed<boolean>(() => configStore.config.fileNameDisplay.includes('title'))
 const fontSize = computed<number>(() => configStore.config.editor.fontSize)
+const lineNumberFontSize = computed<number>(() => resolveLineNumberFontSize(fontSize.value, configStore.config.editor.lineNumberFontSize))
 const globalSearchResults = computed(() => windowStateStore.searchResults)
 const snippets = computed(() => windowStateStore.snippets)
 const tags = computed(() => tagStore.tags)
@@ -260,6 +537,7 @@ const editorConfiguration = computed<EditorConfigOptions>(() => {
     indentWithTabs: editor.indentWithTabs,
     alwaysIndentLineOnTab: editor.alwaysIndentLineOnTab,
     autoCloseBrackets: editor.autoCloseBrackets,
+    autoCloseCharacterPairs: normalizeCharacterPairSettings(editor.autoCloseCharacterPairs, editor.autoCloseBrackets),
     autocorrect: {
       active: editor.autoCorrect.active,
       matchWholeWords: editor.autoCorrect.matchWholeWords,
@@ -275,6 +553,23 @@ const editorConfiguration = computed<EditorConfigOptions>(() => {
     autocompleteWithTab: editor.autocompleteWithTab,
     imagePreviewWidth: display.imageWidth,
     imagePreviewHeight: display.imageHeight,
+    blockquoteIndent: display.blockquoteIndent,
+    blockquoteBackgroundLight: display.blockquoteBackgroundLight,
+    blockquoteBackgroundLightTransparent: display.blockquoteBackgroundLightTransparent,
+    blockquoteBackgroundDark: display.blockquoteBackgroundDark,
+    blockquoteBackgroundDarkTransparent: display.blockquoteBackgroundDarkTransparent,
+    headingSize1: display.headingSize1,
+    headingBold1: display.headingBold1,
+    headingSize2: display.headingSize2,
+    headingBold2: display.headingBold2,
+    headingSize3: display.headingSize3,
+    headingBold3: display.headingBold3,
+    headingSize4: display.headingSize4,
+    headingBold4: display.headingBold4,
+    headingSize5: display.headingSize5,
+    headingBold5: display.headingBold5,
+    headingSize6: display.headingSize6,
+    headingBold6: display.headingBold6,
     boldFormatting: editor.boldFormatting,
     italicFormatting: editor.italicFormatting,
     highlightFormatting: editor.highlightFormatting,
@@ -284,6 +579,13 @@ const editorConfiguration = computed<EditorConfigOptions>(() => {
     idRE: zkn.idRE,
     idGen: zkn.idGen,
     previewModeShowSyntaxWhenCursorIsAdjacent: display.previewModeShowSyntaxWhenCursorIsAdjacent,
+    editCodeWhenClicked: display.editCodeWhenClicked,
+    codeEditingExceptions: { ...display.codeEditingExceptions },
+    // Zettlr-LYH (R84): Track Changes, Show Revisions and the revision author
+    trackChanges: editor.trackChanges,
+    showRevisions: display.showRevisions,
+    revisionAuthor: editor.revisionAuthor,
+    copyVisibleTextCategories: { ...display.copyVisibleTextCategories },
     renderCitations: display.renderCitations,
     renderingMode: display.renderingMode,
     renderIframes: display.renderIframes,
@@ -379,10 +681,20 @@ workspaceStore.$subscribe(() => {
 
 // External commands/"event" system
 watch(toRef(props.editorCommands, 'jumpToLine'), () => {
-  const { filePath, lineNumber } = props.editorCommands.data
-  // Execute a jtl-command if the current displayed file is the correct one
-  if (filePath === props.file.path && typeof lineNumber === 'number') {
-    jtl(lineNumber)
+  const { filePath, lineNumber, cursorOnly, leafId, position } = props.editorCommands.data
+  // Execute a jtl-command if the current displayed file is the correct one.
+  // cursorOnly (Zettlr-LYH R62, PDF backlinks): place the cursor at the start
+  // of the line instead of selecting the whole line.
+  // leafId (Zettlr-LYH R113, table of contents): only the editor of that pane
+  // jumps; jumps without a pane move every editor showing the file. This is
+  // the rule of shouldEditorJump in sidebar/util/toc-display.ts, written out
+  // here because this component imports no sidebar modules.
+  const jumpsHere = filePath === props.file.path &&
+    (typeof leafId !== 'string' || leafId === props.leafId)
+  if (jumpsHere && typeof lineNumber === 'number') {
+    // position (Zettlr-LYH R112): 'reading-line' puts the line top at one
+    // third of the visible height instead of the middle
+    jtl(lineNumber, cursorOnly !== true, position === 'reading-line' ? 'reading-line' : 'center')
   }
 })
 
@@ -394,6 +706,14 @@ watch(toRef(props.editorCommands, 'moveSection'), () => {
   const { from, to } = props.editorCommands.data
   if (typeof from === 'number' && typeof to === 'number') {
     currentEditor?.moveSection(from, to)
+  }
+})
+
+// Zettlr-LYH (R124): the mode bar switched a TOML file between Formatted and
+// Raw Text; the editor keeps its state and only changes the presentation
+watch(toRef(props, 'tomlViewMode'), (mode) => {
+  if (mode !== undefined) {
+    currentEditor?.setTOMLPresentation(mode === 'formatted')
   }
 })
 
@@ -416,6 +736,24 @@ watch(toRef(props.editorCommands, 'executeCommand'), () => {
 
   const command: string = props.editorCommands.data
   currentEditor.runCommand(command)
+  currentEditor.focus()
+})
+
+// Zettlr-LYH (R174, R131): the Text Color and Background Color buttons of the
+// formatting bar. The guards are the same as for executeCommand: only the
+// editor that shows the active file and was the last one to have the focus
+// carries out the request.
+watch(toRef(props.editorCommands, 'applyTextColor'), () => {
+  if (props.activeFile?.path !== props.file.path || currentEditor === null) {
+    return
+  }
+
+  if (documentTreeStore.lastLeafId !== props.leafId) {
+    return
+  }
+
+  const request: { property: ColorProperty, color: string|null } = props.editorCommands.data
+  currentEditor.applyTextColor(request.property, request.color)
   currentEditor.focus()
 })
 
@@ -449,6 +787,30 @@ watch(toRef(props.editorCommands, 'insertPandoc'), () => {
   if ((type === 'div' || type === 'span') && typeof attributes === 'string') {
     currentEditor?.insertPandocDivOrSpan(type as 'div'|'span', attributes)
     currentEditor?.focus()
+  }
+})
+
+// JEV Search (R53): the panel picked a hit (scroll it into the middle of the
+// view and highlight it) or asked to remove the highlight (null). Only the
+// last focused editor of the hit's file shows it; every other editor drops
+// its highlight, so that one chunk at most is highlighted at a time. R57: a
+// request with scroll set to false (the panel restores the pinned hit after a
+// hover preview) only replaces the highlight and leaves the view where it is.
+watch(toRef(props.editorCommands, 'jevSearchHighlight'), () => {
+  if (currentEditor === null) {
+    return
+  }
+
+  const request = props.editorCommands.data as JevSearchHighlightRequest
+  const isTarget = request !== null && typeof request === 'object' &&
+    request.filePath === props.file.path &&
+    props.activeFile?.path === props.file.path &&
+    documentTreeStore.lastLeafId === props.leafId
+
+  if (isTarget && typeof request.from === 'number' && typeof request.to === 'number') {
+    showJevSearchHighlight(currentEditor.instance, request.from, request.to, request.scroll !== false)
+  } else {
+    clearJevSearchHighlight(currentEditor.instance)
   }
 })
 
@@ -594,12 +956,24 @@ watch(tags, (newValue) => {
  *
  * @return  {MarkdownEditor}       The requested editor
  */
-async function getEditorFor (doc: string): Promise<MarkdownEditor> {
+function getEditorFor (doc: string): MarkdownEditor {
   const persistentState = props.persistentStateMap.get(doc)
-  const editor = new MarkdownEditor(props.leafId, props.windowId, doc, documentAuthorityIPCAPI, undefined, persistentState)
+  // Zettlr-LYH (R98): only a file without a reading state in memory asks the
+  // main process for the stored reading position
+  const editor = new MarkdownEditor(
+    props.leafId, props.windowId, doc, documentAuthorityIPCAPI, undefined, persistentState,
+    persistentState === undefined ? () => readStoredTextReadingPosition(doc) : undefined
+  )
+  // Zettlr-LYH (R124): a TOML file loads directly in its current view mode
+  if (props.tomlViewMode !== undefined) {
+    editor.setTOMLPresentation(props.tomlViewMode === 'formatted')
+  }
 
   // Update the document info on corresponding events
   editor.on('loaded', () => {
+    // Zettlr-LYH disk conflicts (R138): loading replaced the editor state, and
+    // with it the read-only mode of a running comparison
+    setOriginalEditorConflictReadOnly(editor.instance, conflictReadOnly.value)
     if (currentEditor === editor) {
       windowStateStore.activeDocumentInfo = currentEditor.documentInfo
       windowStateStore.tableOfContents = currentEditor.tableOfContents
@@ -615,6 +989,39 @@ async function getEditorFor (doc: string): Promise<MarkdownEditor> {
   editor.on('docUpdate', () => {
     if (currentEditor === editor) {
       windowStateStore.activeDocumentInfo = currentEditor.documentInfo
+    }
+  })
+
+  // Zettlr-LYH (R112): the line at one third of the visible height, reported
+  // at most once per frame after scrolling, edits and size changes
+  editor.on('reading-line', (line: number) => {
+    if (currentEditor === editor) {
+      publishReadingLine(line)
+    }
+  })
+
+  // Zettlr-LYH (R98): the reader stopped scrolling for a second
+  editor.on('scroll-idle', () => {
+    if (currentEditor === editor) {
+      storeTextReadingPosition()
+    }
+  })
+
+  // Zettlr-LYH undo history (R135): the user undid the reload of an external
+  // modification (a reload from disk or the result of a comparison)
+  editor.on('undid-external-reload', () => {
+    if (currentEditor === editor) {
+      emit('undidReloadFromDisk')
+    }
+  })
+
+  // Zettlr-LYH data loss prevention (R173): after a load, the editor found
+  // sessions of this file whose input is missing in the document (or, with an
+  // empty list, found that the ones it announced earlier are settled)
+  editor.on('recoverable-sessions', (sessions: RecoverableSession[]) => {
+    if (currentEditor === editor) {
+      recoverableSessions.value = sessions
+      recoveryActionError.value = undefined
     }
   })
 
@@ -672,10 +1079,12 @@ async function getEditorFor (doc: string): Promise<MarkdownEditor> {
  * Loads the document for this editor instance.
  */
 async function loadDocument (): Promise<void> {
-  const newEditor = await getEditorFor(props.file.path)
+  const newEditor = getEditorFor(props.file.path)
 
   mainEditorWrapper.value?.appendChild(newEditor.dom)
   currentEditor = newEditor
+  // The new editor brings its own scroller and gutters (R81)
+  measureEditorGeometry()
 
   currentEditor.setCompletionDatabase('tags', tags.value)
   currentEditor.setCompletionDatabase('snippets', snippets.value)
@@ -689,6 +1098,9 @@ async function loadDocument (): Promise<void> {
   maybeHighlightSearchResults()
 
   const descriptor: MDFileDescriptor|CodeFileDescriptor|undefined = await ipcRenderer.invoke('fsal', { command: 'get-descriptor', payload: props.file.path })
+  if (unmounted || currentEditor !== newEditor) {
+    return
+  }
   if (descriptor === undefined) {
     throw new Error(`Could not swap document: Could not retrieve descriptor for path ${props.file.path}!`)
   }
@@ -713,9 +1125,37 @@ async function loadDocument (): Promise<void> {
   currentEditor.projectInfo = updateProjectInfo()
 }
 
-function jtl (lineNumber: number): void {
-  currentEditor?.jtl(lineNumber)
+function jtl (lineNumber: number, selectLine: boolean = true, position: JumpPosition = 'center'): void {
+  currentEditor?.jtl(lineNumber, selectLine, position)
 }
+
+/**
+ * Zettlr-LYH (R112): reports the reading line of this editor to the window
+ * state, which the sidebar table of contents highlights, but only while this
+ * pane is the active one and its editor shows the active file.
+ *
+ * @param  {number|undefined}  line  The reading line of the current editor
+ */
+function publishReadingLine (line: number|undefined): void {
+  if (
+    line === undefined || unmounted ||
+    documentTreeStore.lastLeafId !== props.leafId ||
+    props.activeFile?.path !== props.file.path
+  ) {
+    return
+  }
+  const previous = windowStateStore.readingLine
+  if (previous !== undefined && previous.leafId === props.leafId && previous.filePath === props.file.path && previous.line === line) {
+    return
+  }
+  windowStateStore.readingLine = { leafId: props.leafId, filePath: props.file.path, line }
+}
+
+// Zettlr-LYH (R112): a pane that becomes active, or a pane whose active file
+// becomes this file, reports where its editor currently stands
+watch(() => [ documentTreeStore.lastLeafId, props.activeFile?.path ], () => {
+  publishReadingLine(currentEditor?.readingLine)
+})
 
 async function updateCitationKeys (library: string): Promise<void> {
   const items: Array<{ citekey: string, displayText: string }> = (await ipcRenderer.invoke('citeproc-provider', {
@@ -768,6 +1208,9 @@ async function updateCitationKeys (library: string): Promise<void> {
       }
     })
 
+  if (unmounted) {
+    return
+  }
   currentEditor?.setCompletionDatabase('citations', items)
 }
 
@@ -777,6 +1220,9 @@ async function updateFileDatabase (): Promise<void> {
 
   // ... and the unique links that are part of the link database
   const rawLinks: Record<string, string[]> = await ipcRenderer.invoke('link-provider', { command: 'get-link-database' })
+  if (unmounted) {
+    return
+  }
   const linkDatabase = [...new Set(Object.values(rawLinks).flat())]
 
   // First, add all existing files to the database ...
@@ -846,13 +1292,19 @@ function maybeHighlightSearchResults (): void {
   transition: 0.2s background-color ease;
   position: relative;
 
+  // The left and right padding follows the toolbar's Margin control (R81)
   .cm-editor {
-    .cm-scroller { padding: 50px 50px; }
+    .cm-scroller { padding: 50px var(--zettlr-editor-margin, 50px); }
     .cm-content { min-width: 0; }
   }
 
+  .cm-lineNumbers { font-size: var(--zettlr-line-number-font-size); }
+
   // Markdown text is justified; code files keep their ragged right edge.
+  // Code block lines stay left-aligned: justification would stretch their
+  // leading indentation and push wrapped lines' content to the right edge.
   &:not(.code-file) .cm-content .cm-line { text-align: justify; }
+  &:not(.code-file) .cm-content .cm-line.code-block-line { text-align: left; }
 
   // If a code file is loaded, we need to display the editor contents in monospace.
   &.code-file .cm-editor {
