@@ -20,6 +20,7 @@ import { CITEPROC_MAIN_DB } from 'source/types/common/citeproc'
 import { nodeToCiteItem } from '../parser/citation-parser'
 import type { SyntaxNode } from '@lezer/common'
 import { getPandocAttributeSection, type PandocAttributeRange } from './pandoc-attribute-menu'
+import { appendExtraMenuItems } from './link-image-menu'
 
 const ipcRenderer = window.ipc
 
@@ -30,8 +31,10 @@ const ipcRenderer = window.ipc
  * @param   {{ x: number, y: number }}  coords  Where to display it
  * @param   {string[]}                  keys    The citation keys
  * @param   {string}                    label   An optional label
+ * @param   {AnyMenuItem[]}             extraItems  Items appended at the end
+ *                                                  after a separator
  */
-export function citationMenu (view: EditorView, coords: { x: number, y: number }, citationNode: SyntaxNode, pandocRange?: PandocAttributeRange): void {
+export function citationMenu (view: EditorView, coords: { x: number, y: number }, citationNode: SyntaxNode, pandocRange?: PandocAttributeRange, extraItems: AnyMenuItem[] = []): void {
   // Calculate the relevant state
   const config = view.state.field(configField).metadata.library
   const callback = window.getCitationCallback(config === '' ? CITEPROC_MAIN_DB : config)
@@ -75,5 +78,5 @@ export function citationMenu (view: EditorView, coords: { x: number, y: number }
     tpl.push(...getPandocAttributeSection(view, pandocRange, coords))
   }
 
-  showPopupMenu(coords, tpl)
+  showPopupMenu(coords, appendExtraMenuItems(tpl, extraItems))
 }

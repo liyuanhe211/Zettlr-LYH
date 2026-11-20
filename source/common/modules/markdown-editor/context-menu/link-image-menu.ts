@@ -19,7 +19,7 @@ import showPopupMenu, { type AnyMenuItem } from '@common/modules/window-register
 import { type SyntaxNode } from '@lezer/common'
 import openMarkdownLink from '../util/open-markdown-link'
 import { shortenUrlVisually } from '@common/util/shorten-url-visually'
-import makeValidUri from 'source/common/util/make-valid-uri'
+import tryMakeValidUri from 'source/common/util/try-make-valid-uri'
 import { pathDirname } from 'source/common/util/renderer-path-polyfill'
 import { configField } from '../util/configuration'
 import type { WindowControlsIPCAPI } from 'source/app/service-providers/windows'
@@ -73,13 +73,82 @@ function getURLForNode (node: SyntaxNode, state: EditorState): string|undefined 
 }
 
 /**
+ * Returns a new menu template with the extra items appended after a separator.
+ * Without extra items, the result has the same items as the template. The
+ * template itself is not modified.
+ *
+ * @param   {AnyMenuItem[]}  template    The menu template
+ * @param   {AnyMenuItem[]}  extraItems  The items to append, possibly none
+ *
+ * @return  {AnyMenuItem[]}              The new menu template
+ */
+export function appendExtraMenuItems (template: AnyMenuItem[], extraItems: AnyMenuItem[]): AnyMenuItem[] {
+  if (extraItems.length === 0) {
+    return [...template]
+  }
+
+  return [ ...template, { type: 'separator' }, ...extraItems ]
+}
+
+/**
+ * Builds the items of the image context menu. "Open image" and "Open in File
+ * Browser" need the absolute URI of the image; if the image URL cannot be
+ * turned into a valid URI, these two items are left out, and "Copy image to
+ * clipboard" stays disabled.
+ *
+ * @param   {string}         url       The image URL as written
+ * @param   {string}         basePath  The directory of the current document
+ *
+ * @return  {AnyMenuItem[]}            The menu items
+ */
+export function buildImageMenuTemplate (url: string, basePath: string): AnyMenuItem[] {
+  const validAbsoluteURI = tryMakeValidUri(url, basePath)
+  const isFileLink = validAbsoluteURI !== null && (validAbsoluteURI.startsWith('safe-file://') || validAbsoluteURI.startsWith('file://'))
+
+  const copyItem: AnyMenuItem = {
+    label: trans('Copy image to clipboard'),
+    id: 'copy-img-to-clipboard',
+    enabled: isFileLink,
+    type: 'normal'
+  }
+
+  if (validAbsoluteURI === null) {
+    return [copyItem]
+  }
+
+  return [
+    copyItem,
+    {
+      label: trans('Open image'),
+      id: 'open-img-in-browser',
+      type: 'normal',
+      action () { window.location.href = validAbsoluteURI }
+    },
+    {
+      label: process.platform === 'darwin' ? trans('Reveal in Finder') : trans('Open in File Browser'),
+      enabled: isFileLink,
+      type: 'normal',
+      action () {
+        ipcRenderer.send('window-controls', {
+          command: 'show-item-in-folder',
+          payload: { itemPath: validAbsoluteURI }
+        } as WindowControlsIPCAPI)
+      }
+    }
+  ]
+}
+
+/**
  * Shows a context menu appropriate for a link or image using the given node
  *
- * @param   {EditorView}                view    The view
- * @param   {SyntaxNode}                node    The node
- * @param   {{ x: number, y: number }}  coords  The coordinates
+ * @param   {EditorView}                view        The view
+ * @param   {SyntaxNode}                node        The node
+ * @param   {{ x: number, y: number }}  coords      The coordinates
+ * @param   {PandocAttributeRange}      pandocRange The Pandoc attribute targets
+ * @param   {AnyMenuItem[]}             extraItems  Items appended at the end
+ *                                                  after a separator
  */
-export function linkImageMenu (view: EditorView, node: SyntaxNode, coords: { x: number, y: number }, pandocRange?: PandocAttributeRange): void {
+export function linkImageMenu (view: EditorView, node: SyntaxNode, coords: { x: number, y: number }, pandocRange?: PandocAttributeRange, extraItems: AnyMenuItem[] = []): void {
   const basePath = pathDirname(view.state.field(configField).metadata.path)
   const url = getURLForNode(node, view.state)
 
@@ -127,38 +196,10 @@ export function linkImageMenu (view: EditorView, node: SyntaxNode, coords: { x: 
     }
   ]
 
-  const validAbsoluteURI = makeValidUri(url, basePath)
-  const isFileLink = validAbsoluteURI.startsWith('safe-file://') || validAbsoluteURI.startsWith('file://')
   const isLink = node.type.name !== 'Image'
-
-  const imgTpl: AnyMenuItem[] = [
-    {
-      label: trans('Copy image to clipboard'),
-      id: 'copy-img-to-clipboard',
-      enabled: isFileLink,
-      type: 'normal'
-    },
-    {
-      label: trans('Open image'),
-      id: 'open-img-in-browser',
-      type: 'normal',
-      action () { window.location.href = validAbsoluteURI }
-    },
-    {
-      label: process.platform === 'darwin' ? trans('Reveal in Finder') : trans('Open in File Browser'),
-      enabled: isFileLink,
-      type: 'normal',
-      action () {
-        ipcRenderer.send('window-controls', {
-          command: 'show-item-in-folder',
-          payload: { itemPath: validAbsoluteURI }
-        } as WindowControlsIPCAPI)
-      }
-    }
-  ]
 
   // Pandoc attribute section (only in Pandoc mode)
   const pandocSection = pandocRange !== undefined ? getPandocAttributeSection(view, pandocRange, coords) : []
 
-  showPopupMenu(coords, [ ...(isLink ? linkTpl : imgTpl), ...pandocSection ])
+  showPopupMenu(coords, appendExtraMenuItems([ ...(isLink ? linkTpl : buildImageMenuTemplate(url, basePath)), ...pandocSection ], extraItems))
 }

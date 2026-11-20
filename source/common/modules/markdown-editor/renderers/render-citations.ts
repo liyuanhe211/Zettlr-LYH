@@ -55,7 +55,7 @@ class CitationWidget extends WidgetType {
       }
 
       elem.textContent = citationTexts.join('; ')
-      elem.addEventListener('click', clickAndSelect(view))
+      elem.addEventListener('click', clickAndSelect(view, 'citations', this.node))
 
       return elem
     }
@@ -73,7 +73,7 @@ class CitationWidget extends WidgetType {
       elem.innerText = this.rawCitation
       elem.classList.add('error')
     }
-    elem.addEventListener('click', clickAndSelect(view))
+    elem.addEventListener('click', clickAndSelect(view, 'citations', this.node))
 
     elem.addEventListener('contextmenu', (event) => {
       const coords = { x: event.clientX, y: event.clientY }
@@ -102,4 +102,4 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): CitationWidget|
   }
 }
 
-export const renderCitations = renderInlineWidgets(shouldHandleNode, createWidget)
+export const renderCitations = renderInlineWidgets(shouldHandleNode, createWidget, undefined, 'citations')
