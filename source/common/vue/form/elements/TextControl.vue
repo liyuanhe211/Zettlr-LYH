@@ -28,6 +28,7 @@
         type="button"
         class="input-reset-button"
         v-bind:title="resetLabel"
+        v-bind:aria-label="resetLabel"
         v-on:click="emit('update:modelValue', typeof reset === 'boolean' ? '' : reset)"
       >
         <cds-icon shape="times"></cds-icon>

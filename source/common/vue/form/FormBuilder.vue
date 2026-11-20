@@ -218,6 +218,7 @@ interface NumberField extends BasicInfo {
   type: 'number'
   min?: number
   max?: number
+  step?: number
   reset?: number
 }
 

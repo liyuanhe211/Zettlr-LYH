@@ -7,6 +7,7 @@
         v-model="value"
         v-bind:min="min"
         v-bind:max="max"
+        v-bind:step="step"
         v-bind:class="{ inline: inline === true }"
         v-bind:disabled="disabled === true"
         type="number"
@@ -33,6 +34,7 @@
       v-model="value"
       v-bind:min="min"
       v-bind:max="max"
+      v-bind:step="step"
       v-bind:class="{ inline: inline === true }"
       v-bind:disabled="disabled === true"
       type="number"
@@ -68,6 +70,7 @@ const props = defineProps<{
   modelValue: number
   min?: number
   max?: number
+  step?: number
   label?: string
   name?: string
   reset?: number

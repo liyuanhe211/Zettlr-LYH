@@ -39,6 +39,7 @@
     v-bind:name="props.field.model"
     v-bind:min="props.field.min"
     v-bind:max="props.field.max"
+    v-bind:step="props.field.step"
     v-bind:reset="props.field.reset"
     v-bind:inline="props.field.inline"
     v-bind:disabled="props.field.disabled"
