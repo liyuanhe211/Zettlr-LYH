@@ -17,7 +17,8 @@
  *                  Supported unit atoms (whitelist): g, mg, mol, mmol, L, mL,
  *                  µL; the liter atoms are also accepted in the lowercase
  *                  spellings l, ml, µl (results always display the canonical
- *                  mL). Compound units are written with a slash directly
+ *                  mL); `%` is a dimensionless factor of 0.01 (`50%` equals
+ *                  0.5). Compound units are written with a slash directly
  *                  between two atoms (g/mol, mmol/mL, g/mL, ...). Supported
  *                  operators: × and * (multiplication), ÷ and / (division),
  *                  + and − / - (addition/subtraction), and parentheses. The
@@ -142,7 +143,9 @@ const UNIT_ATOMS: Record<string, UnitDefinition> = {
   'uL': { factor: 0.001, mass: 0, amount: 0, volume: 1 },
   'µl': { factor: 0.001, mass: 0, amount: 0, volume: 1 },
   'μl': { factor: 0.001, mass: 0, amount: 0, volume: 1 },
-  'ul': { factor: 0.001, mass: 0, amount: 0, volume: 1 }
+  'ul': { factor: 0.001, mass: 0, amount: 0, volume: 1 },
+  // Percent: a dimensionless factor of 0.01 (e.g. a 50% yield)
+  '%': { factor: 0.01, mass: 0, amount: 0, volume: 0 }
 }
 
 /** Characters that may appear in anything we treat as a formula/quantity */
