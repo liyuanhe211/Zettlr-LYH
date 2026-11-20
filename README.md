@@ -16,6 +16,10 @@
   <img src="Manual_Images/pptx-preview.png" alt="The editor split into the Markdown source of a slide document on the left and the live PPTX preview on the right, with overflow badges on the page cards" width="540"> <img src="Manual_Images/pandoc-attributes-panel.png" alt="The Pandoc Attributes panel with the sections Text Span, Table, Table Style, and Page" width="200">
 </p>
 
+- **[Tracked changes.](Manual_User.md#tracking-changes)** While Track Changes is on, insertions and deletions in a Markdown document are recorded with your author name and the time instead of changing the text directly, and each change can later be [accepted or rejected](Manual_User.md#accepting-and-rejecting-changes). Show Revisions switches between showing the changes in color and showing the text as if all of them were accepted.
+
+- **[A read-only PDF viewer.](Manual_User.md#pdf-files)** PDF files open in a tab with scrolling, zoom, the document outline, and text search. Selected text can be [copied as a quote with a link back to its page](Manual_User.md#copying-a-quote-with-a-link-to-its-page) in the format of the Obsidian plugin PDF++; Ctrl+clicking such a link in a note opens the PDF at the quoted place, and [passages quoted in your notes stay shaded in the viewer](Manual_User.md#highlights-of-passages-quoted-in-your-notes).
+
 - **[Calculation of bracketed physical-quantity formulas.](Manual_User.md#bracketed-physical-quantity-formulas)** Formulas written in double brackets are calculated and their results rendered in place, with [control over output units and precision](Manual_User.md#output-units-and-precision), and a command that [exports a copy of the document with the results written in](Manual_User.md#exporting-a-formula-calculated-copy).
 
 <p align="center">
@@ -27,6 +31,8 @@
 <p align="center">
   <img src="Manual_Images/files-opening-history-tree.png" alt="The Files section of the sidebar showing the opening-history tree, with the current document highlighted and the eye button of one folder pressed" width="260">
 </p>
+
+- **[JEV Search.](Manual_User.md#jev-search)** A panel that finds the passages of the current document, [including a PDF](Manual_User.md#searching-a-pdf), that match a description written in ordinary language, using the Jev model of the online service TypeSafe. It needs a TypeSafe API key and sends the document text to TypeSafe.
 
 - **Table editing improvements.** [Column widths stay fixed while you edit, and whole rows copy to and paste from Word and Excel](Manual_User.md#tables); [clicking a rendered cell puts the cursor at the clicked spot](Manual_User.md#clicking-into-a-table-cell); [Enter inserts a `<br>` line break, and arrow keys move within a cell before leaving it](Manual_User.md#line-breaks-and-arrow-keys-in-table-cells); [images](Manual_User.md#images-in-table-cells) and [task checkboxes](Manual_User.md#task-checkboxes-in-table-cells) render inside cells.
 
@@ -42,31 +48,64 @@
   <img src="Manual_Images/export-html-editor-and-browser.png" alt="The same weekly report in the editor on the left and as an exported HTML file in a browser on the right" width="720">
 </p>
 
-- **[A JSON and JSON Lines viewer.](Manual_User.md#json-and-json-lines-files)** `.json` and `.jsonl` files open with a switch between a formatted read-only view (keys as headings) and an editable raw-text view.
+- **[A JSON and JSON Lines viewer.](Manual_User.md#json-and-json-lines-files)** `.json` and `.jsonl` files open with a switch between a formatted read-only view (keys as headings) and an editable raw-text view. Saved Claude Code sessions [appear as a readable conversation](Manual_User.md#conversation-history), and `.toml` files get the same [switch between a formatted read-only view and the raw text](Manual_User.md#toml-reading).
 
 <p align="center">
   <img src="Manual_Images/json-formatted-view.png" alt="A JSON file in the formatted view, with the view switch above the content and keys shown as headings" width="480">
 </p>
 
-- **[A cache of unsaved changes that survives restarts.](Manual_User.md#the-cache-of-unsaved-changes)** Unsaved edits are cached continuously and restored after a crash or restart; when a file [changes on disk](Manual_User.md#when-a-file-changes-on-disk) while it has unsaved edits, a dialog lets you choose which version to keep.
+- **[A cache of unsaved changes that survives restarts.](Manual_User.md#the-cache-of-unsaved-changes)** Unsaved edits are cached continuously and restored after a crash or restart; when a file [changes on disk](Manual_User.md#when-a-file-changes-on-disk) while it has unsaved edits, a dialog lets you choose which version to keep or [merge the two versions side by side](Manual_User.md#merging-the-two-versions).
 
 <p align="center">
   <img src="Manual_Images/dialog-unsaved-changes-found.png" alt="The Unsaved changes found dialog, with the choices Restore unsaved changes and Discard them and load the file from disk" width="340"> <img src="Manual_Images/dialog-file-modified-on-disk.png" alt="The File Modified on Disk dialog, comparing the version on disk with the editor contents and offering three choices" width="400">
 </p>
 
-- **[Opening files from Windows Explorer.](Manual_User.md#opening-files-from-windows-explorer)** A small launcher opens Markdown files in the running instance, or starts the program first.
+- **[Notes that ask for a file name only when you save them.](Manual_User.md#unsaved-notes-created-with-ctrln)** Ctrl+N creates a note at once, without asking for a name or a folder. The note is written automatically to a folder for unsaved notes, and you choose its name and location the first time you save it.
 
-- **Many editing and display refinements.** [Justified text](Manual_User.md#justified-text), [centered image-only lines](Manual_User.md#lines-that-contain-only-images-are-centered), [rectangular (Alt+drag) selection](Manual_User.md#rectangular-selection), [always-visible inline-code backticks](Manual_User.md#inline-code), [a stable view while content loads](Manual_User.md#a-stable-view-while-you-work), [sideways scrolling of the tab bar with the mouse wheel](Manual_User.md#scrolling-the-tab-bar), [file names instead of titles in tabs](Manual_User.md#file-names-instead-of-titles), [improved image pasting](Manual_User.md#pasting-and-dropping-images), and more. See the [Editing](Manual_User.md#editing) chapter and the [toolbar reference](Manual_User.md#the-toolbar).
+- **[Selecting and resizing images by dragging.](Manual_User.md#selecting-and-resizing-an-image)** Clicking a rendered image selects it. Dragging the handles on its left and right edges changes its width, which is written after the image as `{width=NN%}`.
+
+<p align="center">
+  <img src="Manual_Images/editor-image-selected-resized.png" alt="A centered image selected in the editor after its width was changed by dragging, with a blue outline, a handle on each side, and the size label 800×400 · 56%" width="560">
+</p>
+
+- **Managing tabs and open files.** [Ctrl+Shift+T reopens closed tabs](Manual_User.md#reopening-a-closed-tab). A [Windows dialog](Manual_User.md#managing-open-documents-with-the-windows-dialog) lists every open document for switching to, saving, closing, or sorting several at once. [Split-view commands](Manual_User.md#split-view) sit in the toolbar, the View menu, and the tab context menu. A [Recent Files window](Manual_User.md#recent-files) searches the last 1,000 files you visited.
+
+- **[The active file's path in the menu bar.](Manual_User.md#the-file-title-in-the-menu-bar)** The middle of the menu bar shows the active file with its folders and drops the outermost folders as the window gets narrower.
+
+- **[Opening files from Windows Explorer.](Manual_User.md#opening-files-from-windows-explorer)** A small launcher opens Markdown files in the running instance, or starts the program first. The launcher is a local helper and is not included in this repository.
+
+- **Many editing and display refinements.** [Justified text](Manual_User.md#justified-text), [centered image-only lines](Manual_User.md#lines-that-contain-only-images-are-centered), [rectangular (Alt+drag) selection](Manual_User.md#rectangular-selection), [always-visible inline-code backticks](Manual_User.md#inline-code), [a stable view while content loads](Manual_User.md#a-stable-view-while-you-work), [sideways scrolling of the tab bar with the mouse wheel](Manual_User.md#scrolling-the-tab-bar), [file names instead of titles in tabs](Manual_User.md#file-names-instead-of-titles), [improved image pasting](Manual_User.md#pasting-and-dropping-images), [Save As with Ctrl+Shift+S](Manual_User.md#saving-under-a-new-name), [a document outline with a heading-level filter](Manual_User.md#the-document-outline), and more. See the [Editing](Manual_User.md#editing) chapter and the [toolbar reference](Manual_User.md#the-toolbar).
 
 <p align="center">
   <img src="Manual_Images/editor-image-line-centered.png" alt="A bar chart on a line of its own, centered between two justified paragraphs" width="720">
 </p>
 
 <p align="center">
-  <img src="Manual_Images/toolbar.png" alt="The main-window toolbar of Zettlr-LYH with each group of buttons labelled" width="720">
+  <img src="Manual_Images/toolbar-full-light.png" alt="The whole main-window toolbar of Zettlr-LYH in the light theme, from the file manager and insert buttons through Revise Comment, Track Changes, Show Revisions, Accept, Reject, Auto Show Code, and Margin to MD → PPTX, JEV Search, and Toggle Sidebar at the right end" width="720">
 </p>
 
-Zettlr-LYH runs from source in development mode on Windows; the manual covers setup. Everything below this line is the original Zettlr README.
+## Running Zettlr-LYH
+
+Zettlr-LYH runs on Windows only and has no installer. You clone the repository and run the program from its source folder in development mode. You need [Git](https://git-scm.com/download/win), because every start reads the commit hash with `git` (so a copy downloaded as a ZIP file cannot start). You also need Node.js 22.12.0 or newer with corepack, which supplies the Yarn version pinned in `package.json`, so Yarn does not need to be installed separately. The setup script in the last command installs Node.js if it is missing. Run these commands in PowerShell:
+
+```powershell
+git clone https://github.com/liyuanhe211/Zettlr-LYH.git
+cd Zettlr-LYH
+& "$env:ProgramFiles\Git\bin\bash.exe" scripts/get-pandoc.sh win32 x64
+powershell -ExecutionPolicy Bypass -File scripts\start-sandbox.ps1
+```
+
+The third command downloads Pandoc to `resources\pandoc-win32-x64.exe`. The first start needs this file and tries to download it through `bash.exe`, which a standard Git for Windows installation does not put on the PATH, so it is fetched beforehand with Git's own Bash. The setup script checks Node.js, corepack, Git, the dependencies in `node_modules`, and the Electron binaries. It installs or repairs whatever is missing (installing Node.js or Git asks for administrator rights) and then runs `corepack yarn start`. To do the last step by hand instead, run `corepack yarn install`, then `node node_modules/electron/install.js`, then `corepack yarn start`. The middle command cannot be skipped, because the repository disables install scripts and so `yarn install` never downloads the Electron binaries.
+
+- The first start compiles the program and takes a while. Keep the terminal open, because closing it ends the program. To start again later, run the setup script or `corepack yarn start` in the repository folder.
+- Port 3000 must be free, and the port cannot be changed.
+- Settings and data are kept in `resources\test-cfg` inside the repository, so an installed official Zettlr is not affected and can run at the same time.
+- Do not run packaging or build commands in the repository folder while the program runs, because they replace the files the running program uses.
+- The PPTX preview and export additionally need desktop PowerPoint and a few other components. See [Additional requirements for the PPTX features](Manual_User.md#additional-requirements-for-the-pptx-features).
+
+The [installation chapter of the manual](Manual_User.md#installation-and-running) describes each step in detail.
+
+Everything below this line is the original Zettlr README.
 
 ***
 
