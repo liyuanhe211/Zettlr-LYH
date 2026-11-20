@@ -16,65 +16,12 @@
 import { type ChangeSpec } from '@codemirror/state'
 import { type EditorView } from '@codemirror/view'
 import { md2html } from '@common/modules/markdown-utils'
-import html2md from '@common/util/html-to-md'
 import { configField } from './configuration'
-import { pathBasename, pathDirname, relativePath } from '@common/util/renderer-path-polyfill'
+import { markdownVisibleCopyText } from '../plugins/markdown-visible-copy'
+import { revisionCopyText } from '../renderers/render-revisions'
+import { cancelMarkdownImageCopy, copyMarkdownImage } from '../plugins/markdown-image-copy'
 
 const ipcRenderer = window.ipc
-
-/**
- * Handles a paste event (both images and text/HTML)
- *
- * @param  {EditorView}  view  The editor view
- */
-async function handlePaste (view: EditorView): Promise<void> {
-  const basePath = pathDirname(view.state.field(configField).metadata.path)
-
-  // First step: Check for images and, if so, insert them.
-  const clipboardItems = await navigator.clipboard.read()
-  for (const item of clipboardItems) {
-    const hasPlain = item.types.includes('text/plain')
-    const hasHTML = item.types.includes('text/html')
-
-    if (item.types.includes('image/png')) {
-      const pathToInsert: string|undefined = await ipcRenderer.invoke('application', {
-        command: 'save-image-from-clipboard',
-        payload: { startPath: basePath }
-      })
-
-      // If the user aborts the pasting process, the command will return
-      // undefined, so we have to check for this.
-      if (pathToInsert !== undefined) {
-        // Replace backward slashes with forward slashes to make Windows
-        // paths cross-platform compatible
-        const relative = relativePath(basePath, pathToInsert)
-        const sanitizedPath = relative.replace(/\\/g, '/')
-        // We need to replace spaces, since the Markdown parser is strict here
-        const tag = `![${pathBasename(sanitizedPath)}](${sanitizedPath.replace(/ /g, '%20')})`
-        view.dispatch(view.state.replaceSelection(tag), { scrollIntoView: true })
-      }
-      return // NOTE: We are ignoring additional images here, because (a) this
-      // should normally not happen, and (b) it could be an avenue to block the
-      // app if a rogue app adds many items with single images.
-    } else if (hasPlain && hasHTML) {
-      // ... I understand *why* they have implemented this ... but ...
-      const plain = await (await item.getType('text/plain')).text()
-      const html = await (await item.getType('text/html')).text()
-      if (html === plain) {
-        view.dispatch(view.state.replaceSelection(plain), { scrollIntoView: true })
-      } else {
-        const { boldFormatting, italicFormatting } = view.state.field(configField)
-        const emphasis = italicFormatting
-        const strong = boldFormatting.includes('*') ? '*' : '_'
-        const converted = await html2md(html, false, { strong, emphasis })
-        view.dispatch(view.state.replaceSelection(converted), { scrollIntoView: true })
-      }
-    } else if (hasPlain) {
-      const plain = await (await item.getType('text/plain')).text()
-      view.dispatch(view.state.replaceSelection(plain), { scrollIntoView: true })
-    }
-  }
-}
 
 /**
  * Copies whatever is currently selected into the clipboard as HTML (with plain
@@ -83,6 +30,7 @@ async function handlePaste (view: EditorView): Promise<void> {
  * @param   {EditorView}  view  The view
  */
 export function copyAsHTML (view: EditorView): void {
+  cancelMarkdownImageCopy(view)
   const { library } = view.state.field(configField).metadata
   const selections: string[] = []
 
@@ -107,20 +55,21 @@ export function copyAsHTML (view: EditorView): void {
 }
 
 /**
- * Copies whatever is currently selected into the clipboard as-is.
+ * Copies visible content of one enabled hidden Markdown object, otherwise source.
  *
  * @param   {EditorView}  view  The view
  */
 export function copyAsPlain (view: EditorView): void {
-  const selections: string[] = []
-
-  for (const { from, to } of view.state.selection.ranges) {
-    selections.push(view.state.sliceDoc(from, to))
+  if (copyMarkdownImage(view)) {
+    return
   }
+  writePlainClipboard(markdownVisibleCopyText(view.state))
+}
 
+function writePlainClipboard (text: string): void {
   navigator.clipboard.write([
     new ClipboardItem({
-      'text/plain': new Blob([selections.join('\n')], { type: 'text/plain' })
+      'text/plain': new Blob([text], { type: 'text/plain' })
     })
   ])
     .catch(err => console.error(err))
@@ -138,7 +87,11 @@ export function cut (view: EditorView, asHTML?: boolean): void {
   if (asHTML === true) {
     copyAsHTML(view)
   } else {
-    copyAsPlain(view)
+    // Zettlr-LYH (R84): with Show Revisions off, the text with every tracked
+    // change accepted (spec C10, "Copy"); with Show Revisions on, the visible
+    // text of tracked changes the selection cuts through (Decision 107)
+    writePlainClipboard(revisionCopyText(view.state) ??
+      view.state.selection.ranges.map(range => view.state.sliceDoc(range.from, range.to)).join('\n'))
   }
 
   const changes: ChangeSpec[] = []
@@ -146,7 +99,8 @@ export function cut (view: EditorView, asHTML?: boolean): void {
     changes.push({ from, to, insert: '' })
   }
 
-  view.dispatch({ changes })
+  // The user event lets Track Changes record the cut as a deletion (R84)
+  view.dispatch({ changes, userEvent: 'delete.cut' })
 }
 
 /**
@@ -156,7 +110,14 @@ export function cut (view: EditorView, asHTML?: boolean): void {
  * @param   {EditorView}  view  The view
  */
 export function paste (view: EditorView): void {
-  handlePaste(view).catch(err => console.error(err))
+  // The web Clipboard API exposes image previews but loses native copied-file
+  // identity (notably Windows CF_HDROP). Ask this window to perform a native
+  // paste instead, so keyboard, Edit and context-menu Paste share the same
+  // ClipboardEvent and image/file routing. Restore this editor's focus after
+  // the menu before requesting the event; do not recursively call paste here.
+  view.focus()
+  ipcRenderer.invoke('application', { command: 'paste-native' })
+    .catch(err => console.error(err))
 }
 
 /**
