@@ -2,7 +2,7 @@
  * @ignore
  * BEGIN HEADER
  *
- * Contains:        updateOpenHistory
+ * Contains:        updateOpenHistory, appendMissingToOpenHistory
  * CVM-Role:        Utility Function
  * Maintainer:      Yuanhe Li
  * License:         GNU GPL v3
@@ -50,4 +50,41 @@ export function updateOpenHistory (
   }
 
   return updatedHistory.slice(0, limit)
+}
+
+// Zettlr-LYH session tabs in the Files section (R71)
+/**
+ * Merges a batch of paths into the open history without promoting anything.
+ * Entries already contained in the history keep their position; paths that
+ * are missing are appended to the end in the given order, skipping duplicates.
+ * When the result exceeds limit, it is cut off from the end, so that existing
+ * entries are retained in preference to the appended ones. The passed arrays
+ * are never modified; a new array is returned instead.
+ *
+ * @param   {string[]}  history  The current open history, newest first
+ * @param   {string[]}  paths    The absolute paths to add if they are missing
+ * @param   {number}    limit    The maximum history length
+ *
+ * @return  {string[]}           The merged open history, newest first
+ */
+export function appendMissingToOpenHistory (
+  history: string[],
+  paths: string[],
+  limit: number = OPEN_HISTORY_LIMIT
+): string[] {
+  const mergedHistory = [...history]
+  const knownPaths = new Set(history)
+
+  for (const absolutePath of paths) {
+    if (!knownPaths.has(absolutePath)) {
+      knownPaths.add(absolutePath)
+      mergedHistory.push(absolutePath)
+    }
+  }
+
+  if (limit < 0) {
+    return mergedHistory
+  }
+
+  return mergedHistory.slice(0, limit)
 }

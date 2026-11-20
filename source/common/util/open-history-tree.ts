@@ -11,8 +11,8 @@
  *                  most recently opened first) into the folder tree that the
  *                  Files section of the file manager displays. Folders that
  *                  form a single chain are merged into one row, and every
- *                  folder is sorted by how recently one of its files has been
- *                  opened. This module is a pure function: it neither talks to
+ *                  folder lists its directories before files, both ordered by
+ *                  name. This module is a pure function: it neither talks to
  *                  IPC or Vue nor touches the filesystem, so it can be
  *                  unit-tested directly.
  *
@@ -51,6 +51,25 @@ export interface HistoryTreeFolderNode {
 }
 
 export type HistoryTreeNode = HistoryTreeFileNode | HistoryTreeFolderNode
+
+export type HistoryTreeNameComparator = (first: string, second: string) => number
+
+const naturalNameOrder = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+/** Compares sibling names, using the first segment of a merged folder row. */
+export function compareHistoryTreeNodes (
+  first: HistoryTreeNode,
+  second: HistoryTreeNode,
+  compareNames: HistoryTreeNameComparator = naturalNameOrder.compare
+): number {
+  if (first.type !== second.type) {
+    return first.type === 'folder' ? -1 : 1
+  }
+
+  const firstName = first.type === 'folder' ? first.segments[0] : first.name
+  const secondName = second.type === 'folder' ? second.segments[0] : second.name
+  return compareNames(firstName, secondName)
+}
 
 /**
  * The mutable counterpart of HistoryTreeFolderNode that is used while the
@@ -171,7 +190,7 @@ function createFolderNodeBuilder (segments: string[], path: string): FolderNodeB
 /**
  * Turns a builder and everything below it into finished tree nodes: the
  * children are finalized first, then single chains are merged into this row,
- * then the children are sorted by recency and this row's recency is derived
+ * then the children are sorted by type and name and this row's recency is derived
  * from them.
  *
  * @param   {FolderNodeBuilder}      builder    The folder to finalize
@@ -179,18 +198,22 @@ function createFolderNodeBuilder (segments: string[], path: string): FolderNodeB
  *
  * @return  {HistoryTreeFolderNode}             The finished folder node
  */
-function finalizeFolderNode (builder: FolderNodeBuilder, separator: string): HistoryTreeFolderNode {
+function finalizeFolderNode (
+  builder: FolderNodeBuilder,
+  separator: string,
+  compareNames: HistoryTreeNameComparator
+): HistoryTreeFolderNode {
   const children: HistoryTreeNode[] = []
 
   for (const folderChild of builder.folderChildren.values()) {
-    children.push(finalizeFolderNode(folderChild, separator))
+    children.push(finalizeFolderNode(folderChild, separator, compareNames))
   }
 
   for (const fileChild of builder.fileChildren.values()) {
     children.push(fileChild)
   }
 
-  children.sort((first, second) => first.recency - second.recency)
+  children.sort((first, second) => compareHistoryTreeNodes(first, second, compareNames))
 
   // Merge single chains: as long as this row has exactly one child and that
   // child is a folder (which also means this row has no file children), the
@@ -242,12 +265,12 @@ function finalizeFolderNode (builder: FolderNodeBuilder, separator: string): His
  *                                    to a backslash if any path contains one,
  *                                    and to a forward slash otherwise
  *
- * @return  {HistoryTreeFolderNode[]} The top level of the tree, sorted by
- *                                    recency, most recent first
+ * @return  {HistoryTreeFolderNode[]} The top level of the tree, sorted by name
  */
 export function buildOpenHistoryTree (
   historyPaths: string[],
-  separator?: string
+  separator?: string,
+  compareNames: HistoryTreeNameComparator = naturalNameOrder.compare
 ): HistoryTreeFolderNode[] {
   const pathSeparator = separator ?? detectSeparator(historyPaths)
   const rootBuilders = new Map<string, FolderNodeBuilder>()
@@ -326,10 +349,10 @@ export function buildOpenHistoryTree (
   const topLevelNodes: HistoryTreeFolderNode[] = []
 
   for (const rootBuilder of rootBuilders.values()) {
-    topLevelNodes.push(finalizeFolderNode(rootBuilder, pathSeparator))
+    topLevelNodes.push(finalizeFolderNode(rootBuilder, pathSeparator, compareNames))
   }
 
-  topLevelNodes.sort((first, second) => first.recency - second.recency)
+  topLevelNodes.sort((first, second) => compareHistoryTreeNodes(first, second, compareNames))
 
   return topLevelNodes
 }
