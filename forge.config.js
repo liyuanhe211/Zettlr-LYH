@@ -242,10 +242,20 @@ module.exports = {
     // resources directory. After the `generateAssets` step, this will also
     // include the Pandoc binary (this is why we cannot leave `extraResource`
     // undefined).
-    extraResource: process.platform === 'darwin' ? [
-      'resources/icons/icon.code.icns',
-      'resources/icons/Assets.car' // Contains the new Liquid Glass app icon
-    ] : []
+    extraResource: [
+      ...(process.platform === 'darwin' ? [
+        'resources/icons/icon.code.icns',
+        'resources/icons/Assets.car' // Contains the new Liquid Glass app icon
+      ] : []),
+      // The font file for the document tabs. On Windows, the main process
+      // installs it for the current user from the resources folder if the
+      // computer does not have it (see source/app/util/bundled-font-install.ts).
+      // The file is not in the repository (its license does not allow
+      // redistribution), so it is only bundled when present locally.
+      ...(require('fs').existsSync(path.join(__dirname, 'static/fonts/YaHei.Consolas.1.12.ttf'))
+        ? ['static/fonts/YaHei.Consolas.1.12.ttf']
+        : [])
+    ]
   },
   plugins: [
     {
@@ -265,6 +275,26 @@ module.exports = {
         // both ports, because changing only one doesn't solve the issue.
         port: 3000,
         loggerPort: 9001,
+        // The dev server would cover the whole window with an overlay for every
+        // uncaught runtime error. Since the development build is also used day
+        // to day, the app reports these errors itself instead: it logs them
+        // and shows a warning dialog with an OK button (see
+        // report-runtime-errors.ts in the window-register module).
+        // The dev server also watches its own output directory and tells every
+        // window to reload whenever a file there is reported as changed. On
+        // Windows, merely reading a file can be reported as a change, so a
+        // reload re-reads the files and triggers further reloads: thousands of
+        // them in a row, after which the main window may stay blank (white).
+        // Code changes keep reaching the windows through hot module
+        // replacement, which falls back to a full reload by itself.
+        devServer: {
+          liveReload: false,
+          client: {
+            overlay: {
+              runtimeErrors: false
+            }
+          }
+        },
         renderer: {
           config: './webpack.renderer.config.js',
           entryPoints: [
@@ -280,6 +310,7 @@ module.exports = {
             generateRendererEntrypoint('error', 'win-error'),
             generateRendererEntrypoint('about', 'win-about'),
             generateRendererEntrypoint('stats', 'win-stats'),
+            generateRendererEntrypoint('recent_files', 'win-recent-files'),
             generateRendererEntrypoint('assets', 'win-assets'),
             generateRendererEntrypoint('update', 'win-update'),
             generateRendererEntrypoint('project_properties', 'win-project-properties'),

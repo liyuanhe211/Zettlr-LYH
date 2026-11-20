@@ -79,6 +79,8 @@ declare const PRINT_PRELOAD_WEBPACK_ENTRY: string
 declare const PRINT_WEBPACK_ENTRY: string
 declare const STATS_PRELOAD_WEBPACK_ENTRY: string
 declare const STATS_WEBPACK_ENTRY: string
+declare const RECENT_FILES_PRELOAD_WEBPACK_ENTRY: string
+declare const RECENT_FILES_WEBPACK_ENTRY: string
 declare const TAG_MANAGER_PRELOAD_WEBPACK_ENTRY: string
 declare const TAG_MANAGER_WEBPACK_ENTRY: string
 declare const UPDATE_PRELOAD_WEBPACK_ENTRY: string
