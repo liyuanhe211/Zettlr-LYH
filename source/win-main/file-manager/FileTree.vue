@@ -7,14 +7,43 @@
     v-bind:aria-hidden="!isVisible"
     v-on:click="clickHandler"
   >
-    <template v-if="rootDescriptors.length > 0">
-      <div v-if="filterQuery.trim() !== '' && filterResults.length === 0" class="empty-tree">
+    <section v-if="pinnedFiles.length > 0" class="pinned-files" aria-label="Pinned">
+      <div class="pinned-files-heading">
+        <cds-icon shape="pin" role="presentation"></cds-icon>
+        Pinned
+      </div>
+      <button
+        v-for="file in pinnedFiles"
+        v-bind:key="file.path"
+        type="button"
+        v-bind:class="{ 'pinned-file': true, active: file.active }"
+        v-bind:title="file.path"
+        v-bind:data-path="file.path"
+        v-on:click.stop="openPinnedFile(file)"
+        v-on:mousedown.middle.prevent
+      >
+        <cds-icon shape="pin" role="presentation"></cds-icon>
+        <span>{{ file.label }}</span>
+      </button>
+    </section>
+    <!-- Zettlr-LYH (R71): the open history alone suffices to show the tree,
+    even before the FSAL has loaded the root descriptors -->
+    <!-- Zettlr-LYH (R87): the Show Only Folders with Open Tabs mode keeps its
+    header on screen even without any open tab, so that it can be left again -->
+    <!-- Zettlr-LYH (R96, R144): so do the scratch notes, which the Files
+    section lists below Unsaved Files: those open in this window and those with
+    content in the scratch folder on disk. The open history files count only
+    while they have a tab. The header, with its menu, stays on screen as long
+    as the open history is not empty, also when no tab and no scratch note is
+    open; a line below it then says so. -->
+    <template v-if="openHistoryPaths.length > 0 || rootDescriptors.length > 0 || showOnlyOpenTabs || unsavedFilePaths.length > 0 || pinnedFiles.length > 0">
+      <div v-if="showsNoResults" class="empty-tree">
         <div class="info">
           {{ noResultsMessage }}
         </div>
       </div>
 
-      <template v-if="filteredHistoryPaths.length > 0">
+      <template v-if="filteredHistoryPaths.length > 0 || showOnlyOpenTabs || filteredUnsavedFilePaths.length > 0 || keepsEmptyFilesHeader">
         <div
           id="directories-files-header"
           v-bind:title="showFilesSection ? hideFilesLabel : showFilesLabel"
@@ -35,7 +64,7 @@
             ></cds-icon>
           </span>
 
-          {{ fileSectionHeading }}
+          {{ showOnlyOpenTabs ? openTabsSectionHeading : fileSectionHeading }}
 
           <cds-icon
             role="presentation"
@@ -46,10 +75,21 @@
         </div>
 
         <template v-if="showFilesSection">
+          <div
+            v-if="showsNoOpenTabsMessage"
+            class="open-tabs-empty"
+          >
+            {{ noOpenTabsMessage }}
+          </div>
+          <!-- Stays mounted while the open tabs mode has nothing to show, so
+          that it keeps its record of the rows it has already unfolded -->
           <HistoryTree
             ref="historyTreeComponent"
             v-bind:history-paths="filteredHistoryPaths"
             v-bind:filter-active="query !== ''"
+            v-bind:filter-query="query"
+            v-bind:scratch-notes-on-disk="scratchNotesOnDisk"
+            v-bind:open-tabs-only="showOnlyOpenTabs"
             v-bind:active-item="activeTreeItem?.[0]"
             v-bind:window-id="props.windowId"
           ></HistoryTree>
@@ -174,6 +214,16 @@ import type { CloseAllIPCAPI } from 'source/app/service-providers/windows'
 import PopoverWrapper from 'source/common/vue/PopoverWrapper.vue'
 import ButtonControl from 'source/common/vue/form/elements/ButtonControl.vue'
 import { filterDescriptorChildren } from './util/filter-children'
+import { collectOpenTabPaths, filterOpenTabPaths } from './util/open-tab-paths'
+import {
+  UNSAVED_FILES_PATH,
+  collectUnsavedTabPaths,
+  filterUnsavedTabPaths,
+  mergeUnsavedFilePaths,
+  selectHistoryPathsWithOpenTab
+} from './util/unsaved-tab-paths'
+import { useScratchNotesOnDisk } from './util/use-scratch-notes-on-disk'
+import getDocumentTitle from '../util/get-document-title'
 
 const ipcRenderer = window.ipc
 
@@ -205,11 +255,15 @@ const configStore = useConfigStore()
 const rootDescriptors = computed(() => workspaceStore.rootDescriptors)
 
 const showFilesSection = computed(() => configStore.config.fileManagerShowFiles)
+// Zettlr-LYH (R87): the Files section lists only the files open as tabs
+const showOnlyOpenTabs = computed(() => configStore.config.fileManagerShowOnlyOpenTabs)
 const showWorkspacesSection = computed(() => configStore.config.fileManagerShowWorkspaces)
 const lastLeafId = computed(() => documentTreeStore.lastLeafId)
 
 const platform = process.platform
 const fileSectionHeading = trans('Files')
+const openTabsSectionHeading = trans('Files (Open Tabs)')
+const noOpenTabsMessage = trans('No open tabs')
 const workspaceSectionHeading = trans('Workspaces')
 const noRootsMessage = trans('No open files or folders')
 const noResultsMessage = trans('No results')
@@ -223,6 +277,30 @@ const useH1 = computed(() => configStore.config.fileNameDisplay.includes('headin
 const useTitle = computed(() => configStore.config.fileNameDisplay.includes('title'))
 
 const query = computed(() => props.filterQuery.trim().toLowerCase())
+
+// Derive this collection from the existing tab state; no second pin registry.
+const pinnedFiles = computed(() => {
+  const files = new Map<string, { path: string, label: string, leafId: string, active: boolean }>()
+  for (const pane of documentTreeStore.paneData) {
+    for (const file of pane.openFiles) {
+      if (!file.pinned) { continue }
+      const label = getDocumentTitle(file.path)
+      if (query.value !== '' && !`${label}\n${file.path}`.toLowerCase().includes(query.value)) { continue }
+      const active = pane.id === lastLeafId.value && pane.activeFile?.path === file.path
+      if (!files.has(file.path) || active) {
+        files.set(file.path, { path: file.path, label, leafId: pane.id, active })
+      }
+    }
+  }
+  return [...files.values()]
+})
+
+function openPinnedFile (file: { path: string, leafId: string }): void {
+  ipcRenderer.invoke('documents-provider', {
+    command: 'open-file',
+    payload: { path: file.path, windowId: props.windowId, leafId: file.leafId, newTab: true, insertAfterActiveTab: true }
+  } satisfies DocumentManagerIPCAPI).catch(error => console.error(error))
+}
 
 const filterResults = computed<string[]>(() => {
   const q = query.value
@@ -259,15 +337,82 @@ const getFiles = computed(() => {
 const openHistoryPaths = computed(() => configStore.config.app.openFiles)
 
 /**
- * The open history reduced to the files that match the quick filter. With no
- * filter query, this is the entire history.
+ * Every file open as a tab in any editor pane of this window, each one once.
  */
-const filteredHistoryPaths = computed(() => {
-  if (query.value === '') {
-    return openHistoryPaths.value
+const openTabPaths = computed(() => collectOpenTabPaths(documentTreeStore.paneData, openHistoryPaths.value))
+
+/**
+ * Zettlr-LYH (R144): the open history files that still have a tab in this
+ * window. A file leaves the Files section when its last tab is closed; the open
+ * history itself is kept for the restoration of the session and other uses.
+ */
+const historyPathsWithOpenTab = computed(() => selectHistoryPathsWithOpenTab(openHistoryPaths.value, openTabPaths.value))
+
+/**
+ * Zettlr-LYH (R96, R144): the scratch notes the Files section lists below
+ * Unsaved Files. These are the scratch notes open as tabs in this window, then
+ * the scratch notes with content in the scratch folder on disk that have no tab,
+ * which the main process reports. HistoryTree.vue shows them as rows and gets
+ * the scratch notes on disk from here.
+ */
+const scratchDirectory = computed<string>(() => {
+  const configured: unknown = configStore.config.scratchNotesDirectory
+  return typeof configured === 'string' ? configured : ''
+})
+
+const unsavedTabPaths = computed(() => collectUnsavedTabPaths(documentTreeStore.paneData, scratchDirectory.value))
+
+// The scratch notes on disk are fetched again whenever the set of open tabs or
+// the scratch folder changes
+const scratchNotesOnDisk = useScratchNotesOnDisk(() => {
+  const tabPaths = documentTreeStore.paneData.flatMap(pane => pane.openFiles.map(openFile => openFile.path))
+  return JSON.stringify([ scratchDirectory.value, ...tabPaths.sort() ])
+})
+
+const unsavedFilePaths = computed(() => mergeUnsavedFilePaths(unsavedTabPaths.value, scratchNotesOnDisk.value))
+
+const filteredUnsavedFilePaths = computed(() => {
+  return filterUnsavedTabPaths(unsavedFilePaths.value, query.value, filePath => getDocumentTitle(filePath))
+})
+
+/**
+ * Zettlr-LYH (R144): without a filter query, the header of the Files section
+ * stays on screen as long as the open history is not empty, also when no history
+ * file has a tab and no scratch note is listed, so that its menu stays reachable.
+ */
+const keepsEmptyFilesHeader = computed(() => query.value === '' && openHistoryPaths.value.length > 0)
+
+/**
+ * Zettlr-LYH (R87, R144): whether the line No open tabs stands below the header
+ * of the Files section. In the Show Only Folders with Open Tabs mode that is the
+ * case without any open tab. In the other mode it is the case when there is
+ * neither an open tab nor a scratch note to list (one on disk counts) and no
+ * filter query.
+ */
+const showsNoOpenTabsMessage = computed(() => {
+  if (showOnlyOpenTabs.value) {
+    return openTabPaths.value.length === 0
   }
 
-  return openHistoryPaths.value.filter(absPath => filterResults.value.includes(absPath))
+  return query.value === '' && openTabPaths.value.length === 0 && unsavedFilePaths.value.length === 0
+})
+
+/**
+ * The paths the Files section shows, reduced to the files that match the quick
+ * filter: the open history files that have a tab in this window (R144), or in
+ * the Show Only Folders with Open Tabs mode the files open as tabs (R87). With
+ * no filter query, this is the entire list.
+ */
+const filteredHistoryPaths = computed(() => {
+  if (showOnlyOpenTabs.value) {
+    return filterOpenTabPaths(openTabPaths.value, query.value, filterResults.value)
+  }
+
+  if (query.value === '') {
+    return historyPathsWithOpenTab.value
+  }
+
+  return historyPathsWithOpenTab.value.filter(absPath => filterResults.value.includes(absPath))
 })
 
 /**
@@ -287,6 +432,23 @@ const getDirectories = computed(() => {
   return roots.filter(root => {
     return filterResults.value.some(res => res.startsWith(root.path))
   })
+})
+
+/**
+ * Whether to cover the pane with the No results message. In the Show Only
+ * Folders with Open Tabs mode, the Files section matches the open tabs rather
+ * than the workspace descriptors, so it counts as empty on its own terms (R87).
+ */
+const showsNoResults = computed(() => {
+  if (query.value === '' || filteredUnsavedFilePaths.value.length > 0 || pinnedFiles.value.length > 0) {
+    return false
+  }
+
+  if (showOnlyOpenTabs.value) {
+    return filteredHistoryPaths.value.length === 0 && getDirectories.value.length === 0
+  }
+
+  return filterResults.value.length === 0
 })
 
 const flatSortedAndFilteredVisualFileDescriptors = computed<Array<[string, string]>>(() => {
@@ -367,7 +529,20 @@ function closeAllFiles (): void {
 
 // Context menu for the `Files` header
 function fileRootContextMenu (event: MouseEvent): void {
+  const showsOnlyOpenTabs = showOnlyOpenTabs.value
   const template: AnyMenuItem[] = [
+    {
+      // Zettlr-LYH (R87)
+      label: trans('Show Only Folders with Open Tabs'),
+      type: 'checkbox',
+      checked: showsOnlyOpenTabs,
+      action () {
+        configStore.setConfigValue('fileManagerShowOnlyOpenTabs', !showsOnlyOpenTabs)
+      }
+    },
+    {
+      type: 'separator'
+    },
     {
       label: trans('Close all files'),
       type: 'normal',
@@ -461,6 +636,14 @@ function clickHandler (event: MouseEvent): void {
   emit('selection', event)
 }
 
+/**
+ * Whether a row belongs to the Files section while it is in the Show Only
+ * Folders with Open Tabs mode, where folders cannot be collapsed (R87).
+ */
+function isOpenTabsRow (path: string): boolean {
+  return showOnlyOpenTabs.value && historyTreeVisibleRows.value.some(row => row[0] === path)
+}
+
 function navigate (event: KeyboardEvent): void {
   // The user requested to navigate into the file tree with the keyboard
   // Only capture arrow movements
@@ -480,6 +663,11 @@ function navigate (event: KeyboardEvent): void {
     return // Nothing to navigate
   }
 
+  // Zettlr-LYH (R96): Unsaved Files is no path on disk and cannot be opened
+  if (event.key === 'Enter' && activeTreeItem.value?.[0] === UNSAVED_FILES_PATH) {
+    return
+  }
+
   if (event.key === 'Enter' && activeTreeItem.value !== undefined) {
     // Open the currently active item
     if (activeTreeItem.value[0] === 'directory') {
@@ -492,7 +680,9 @@ function navigate (event: KeyboardEvent): void {
           path: activeTreeItem.value[0],
           windowId: props.windowId,
           leafId: lastLeafId.value,
-          newTab: false
+          newTab: false,
+          checkAgainstDisk: true, // Zettlr-LYH open-with disk check (R51)
+          insertAfterActiveTab: true
         }
       } as DocumentManagerIPCAPI)
         .catch(e => console.error(e))
@@ -510,6 +700,11 @@ function navigate (event: KeyboardEvent): void {
       currentIndex--
       break
     case 'ArrowLeft':
+      // Zettlr-LYH (R87): the open tabs mode keeps every Files row expanded
+      // and leaves the stored unfolded rows untouched
+      if (currentIndex > -1 && isOpenTabsRow(flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][0])) {
+        break
+      }
       // Close a directory if applicable
       if (currentIndex > -1 && flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][1] === 'directory') {
         const path = flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][0]
@@ -519,7 +714,11 @@ function navigate (event: KeyboardEvent): void {
         }
         return // No need to update activeTreeItem
       } else if (currentIndex > -1 && flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][1] !== 'directory') {
-        const path = pathDirname(flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][0])
+        // Zettlr-LYH (R96): the parent row of a scratch note is Unsaved Files
+        const rowPath = flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][0]
+        const path = historyTreeComponent.value?.unsavedFilePaths.includes(rowPath) === true
+          ? UNSAVED_FILES_PATH
+          : pathDirname(rowPath)
         const idx = windowStateStore.uncollapsedDirectories.indexOf(path)
         if (idx > -1) {
           windowStateStore.uncollapsedDirectories.splice(idx, 1)
@@ -531,7 +730,11 @@ function navigate (event: KeyboardEvent): void {
       break
     case 'ArrowRight':
       // Open a directory if applicable
-      if (currentIndex > -1 && flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][1] === 'directory') {
+      if (
+        currentIndex > -1 &&
+        flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][1] === 'directory' &&
+        !isOpenTabsRow(flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][0])
+      ) {
         const path = flatSortedAndFilteredVisualFileDescriptors.value[currentIndex][0]
         if (!windowStateStore.uncollapsedDirectories.includes(path)) {
           windowStateStore.uncollapsedDirectories.push(path)
@@ -671,6 +874,32 @@ body {
 
     &.hidden { left:-100%; }
 
+    .pinned-files-heading {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px 4px;
+      font-weight: bold;
+    }
+
+    .pinned-file {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 4px 12px;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      font: inherit;
+      cursor: pointer;
+
+      span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      &:hover, &.active { background-color: var(--grey-1); }
+      &:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+    }
+
     // Nothing in this pane displays an angle to say whether it is unfolded.
     // Instead, the icon of a section header or of an expandable row doubles as
     // a checkable button, and being visibly pressed in is what says "expanded".
@@ -720,6 +949,14 @@ body {
 
     .list-item {
       position: relative;
+    }
+
+    // Zettlr-LYH (R87): the line below the Files header in the open tabs mode
+    // when this window has no open tab
+    .open-tabs-empty {
+      padding: 4px 10px;
+      color: var(--grey-4);
+      font-style: italic;
     }
 
     .empty-tree {
