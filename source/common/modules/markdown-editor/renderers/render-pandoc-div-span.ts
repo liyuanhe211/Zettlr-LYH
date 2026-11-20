@@ -19,8 +19,9 @@ import { syntaxTree } from '@codemirror/language'
 import type { Range, RangeSet } from '@codemirror/state'
 import { BlockWrapper, Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import { parsePandocAttributes } from 'source/common/pandoc-util/parse-pandoc-attributes'
-import { rangeInSelection } from '../util/range-in-selection'
+import { shouldRevealSource, sourceRevealChanged } from '../util/reveal-selection'
 import { configField } from '../util/configuration'
+import { parseRevisionAttributes } from '../revisions/revision-model'
 
 function createSpanDecorations (view: EditorView): RangeSet<Decoration> {
   const ranges: Range<Decoration>[] = []
@@ -31,7 +32,7 @@ function createSpanDecorations (view: EditorView): RangeSet<Decoration> {
     syntaxTree(view.state).iterate({
       from, to,
       enter: (node) => {
-        if (rangeInSelection(view.state.selection, node.from, node.to, includeAdjacent)) {
+        if (shouldRevealSource(view.state, 'pandoc', node.from, node.to, includeAdjacent)) {
           return
         }
 
@@ -61,8 +62,14 @@ function createSpanDecorations (view: EditorView): RangeSet<Decoration> {
           return
         }
 
+        // Zettlr-LYH (R84): tracked changes are displayed by renderRevisions
+        const attributeText = view.state.sliceDoc(attrs.from, attrs.to)
+        if (parseRevisionAttributes(attributeText) !== undefined) {
+          return
+        }
+
         // Parse the classes and other attributes to render in the decoration.
-        const attributes = parsePandocAttributes(view.state.sliceDoc(attrs.from, attrs.to))
+        const attributes = parsePandocAttributes(attributeText)
         const classes = attributes.classes ?? []
         const id = attributes.id ?? ''
 
@@ -92,17 +99,30 @@ function createDivDecorations (view: EditorView): RangeSet<BlockWrapper> {
 
   const includeAdjacent = view.state.field(configField, false)?.previewModeShowSyntaxWhenCursorIsAdjacent ?? true
 
+  // Zettlr-LYH: every replaced range of at least 20 characters (a rendered
+  // formula, for instance) splits the visible ranges, and each visible range
+  // enters every div it touches. Wrapping a div once per visible range would
+  // nest as many identical wrappers into each other, so every PandocDiv node
+  // is handled only once.
+  const handledDivs = new Set<string>()
+
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(view.state).iterate({
       from, to,
       enter: (node) => {
-        if (rangeInSelection(view.state.selection, node.from, node.to, includeAdjacent)) {
+        if (shouldRevealSource(view.state, 'pandoc', node.from, node.to, includeAdjacent)) {
           return
         }
 
         if (node.name !== 'PandocDiv') {
           return
         }
+
+        const nodeKey = `${node.from}:${node.to}`
+        if (handledDivs.has(nodeKey)) {
+          return
+        }
+        handledDivs.add(nodeKey)
 
         const marks = node.node.getChildren('PandocDivMark')
         const attrs = node.node.getChild('PandocAttribute')
@@ -164,7 +184,7 @@ const pandocDivSpanPlugin = ViewPlugin.fromClass(class {
   }
 
   update (update: ViewUpdate) {
-    if (update.docChanged || update.viewportChanged || update.selectionSet) {
+    if (update.docChanged || update.viewportChanged || update.selectionSet || sourceRevealChanged(update)) {
       this.spanDecorations = createSpanDecorations(update.view)
       this.divWrappers = createDivDecorations(update.view)
     }
@@ -195,7 +215,13 @@ export const renderPandoc = [
     // the div marks (`:::`) are easier to see.
     'pandoc-div-mark-wrapper': {
       display: 'block',
-      fontSize: '18px',
+      // The marks follow the editor's base font size (a custom property set on
+      // the editor wrapper) instead of `em`: a div mark can sit inside a
+      // heading, whose own font-size is a multiple such as 2em, and an `em`
+      // value would be multiplied by that again — the whole point here is to
+      // undo the enlargement of the surrounding element. The fallback equals
+      // the previous fixed size of 18px (the default editor font size).
+      fontSize: 'var(--editor-base-font-size, 18px)',
       fontWeight: 'initial',
       fontVariant: 'initial',
       color: 'initial',

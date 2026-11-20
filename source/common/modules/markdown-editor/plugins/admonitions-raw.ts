@@ -14,8 +14,29 @@
  */
 
 import { syntaxTree } from '@codemirror/language'
+import { sourceRevealChanged } from '../util/reveal-selection'
 import type { RangeSet, Range } from '@codemirror/state'
 import { EditorView, Decoration, ViewPlugin, type ViewUpdate } from '@codemirror/view'
+// Zettlr-LYH (R60): PDF++ callouts
+import { parsePdfCallout } from '../parser/admonition-parser'
+import { pdfCalloutBarColorsByClass, pdfCalloutColorClass } from '../renderers/render-admonitions'
+
+/**
+ * Zettlr-LYH (R60): theme rules that give the `[!PDF|<color>]` marker of PDF++
+ * callouts the color that their bar has in preview mode
+ *
+ * @return  {Record<string, { color: string }>}  The rules
+ */
+function pdfCalloutMarkRules (): Record<string, { color: string }> {
+  const rules: Record<string, { color: string }> = {}
+  for (const [ colorClass, barColor ] of pdfCalloutBarColorsByClass()) {
+    rules[`.cm-pdf-callout-mark.${colorClass}`] = { color: barColor }
+    // The marker is highlighted as a link as well, so its inner spans need
+    // the color, too
+    rules[`.cm-pdf-callout-mark.${colorClass} *`] = { color: barColor }
+  }
+  return rules
+}
 
 function renderAdmonitionRaw (view: EditorView): RangeSet<Decoration> {
   const inlineRanges: Range<Decoration>[] = []
@@ -26,6 +47,19 @@ function renderAdmonitionRaw (view: EditorView): RangeSet<Decoration> {
       from,
       to,
       enter: (node) => {
+        // Zettlr-LYH (R60): PDF++ callouts are Blockquote nodes; color their
+        // marker
+        if (node.type.is('Blockquote')) {
+          const callout = parsePdfCallout(node.node, view.state.doc)
+          if (callout !== null) {
+            const markerDeco = Decoration.mark({
+              class: `cm-pdf-callout-mark ${pdfCalloutColorClass(callout.color)}`
+            })
+            inlineRanges.push(markerDeco.range(callout.markerFrom, callout.markerTo))
+          }
+          return
+        }
+
         if (!node.type.is('Admonition')) {
           return
         }
@@ -55,7 +89,7 @@ const admonitionRawPlugin = ViewPlugin.fromClass(
     }
 
     update (update: ViewUpdate) {
-      if (update.docChanged || update.viewportChanged || update.selectionSet) {
+      if (update.docChanged || update.viewportChanged || update.selectionSet || sourceRevealChanged(update)) {
         this.inlines = renderAdmonitionRaw(update.view)
       }
     }
@@ -80,5 +114,7 @@ export const renderRawAdmonitions = [
     '.important > :is(.cm-admonition-mark, .cm-admonition-keyword, .cm-code-mark)': { color: 'var(--zettlr-important-color)' },
     '.warning > :is(.cm-admonition-mark, .cm-admonition-keyword, .cm-code-mark)': { color: 'var(--zettlr-warning-color)' },
     '.caution > :is(.cm-admonition-mark, .cm-admonition-keyword, .cm-code-mark)': { color: 'var(--zettlr-caution-color)' },
+    // Zettlr-LYH (R60): PDF++ callouts
+    ...pdfCalloutMarkRules()
   }),
 ]
